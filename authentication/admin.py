@@ -1,7 +1,11 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
+<<<<<<< HEAD
 from .models import Company, CustomUser, Product
+=======
+from .models import CustomUser,Mpin
+>>>>>>> 708ed513a7026fe5d08ec211db8596e7a52df956
 
 
 @admin.register(CustomUser)
@@ -25,6 +29,7 @@ class CustomUserAdmin(UserAdmin):
         }),
     )
 
+<<<<<<< HEAD
 
 class ProductInline(admin.TabularInline):
     model = Product
@@ -41,3 +46,6 @@ class CompanyAdmin(admin.ModelAdmin):
     search_fields = ("company_name", "company_code", "contact_name", "mobile_number", "email")
     inlines = [ProductInline]
     readonly_fields = ("draft_token", "company_code", "created_at", "updated_at")
+=======
+admin.site.register(Mpin)
+>>>>>>> 708ed513a7026fe5d08ec211db8596e7a52df956

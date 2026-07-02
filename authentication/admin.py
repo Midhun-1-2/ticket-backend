@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import CustomUser
+from .models import CustomUser,Mpin
 
 
 @admin.register(CustomUser)
@@ -24,3 +24,5 @@ class CustomUserAdmin(UserAdmin):
             "fields": ("phone_number", "full_name", "role", "password1", "password2"),
         }),
     )
+
+admin.site.register(Mpin)

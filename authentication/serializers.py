@@ -13,8 +13,12 @@ class RoleDetectSerializer(serializers.Serializer):
         phone_number = self.validated_data["phone_number"]
         user = User.objects.filter(phone_number=phone_number).first()
         if not user:
-            return {"exists": False, "role": None}
-        return {"exists": True, "role": user.role}
+            return {"exists": False, "role": None, "has_mpin": False}
+        return {
+            "exists": True,
+            "role": user.role,
+            "has_mpin": hasattr(user, "mpin"),
+        }
 
 
 class LoginInputSerializer(serializers.Serializer):
@@ -44,3 +48,4 @@ class MpinCreateSerializer(serializers.Serializer):
         if attrs["mpin"] != attrs["confirm_mpin"]:
             raise serializers.ValidationError("M-PINs do not match.")
         return attrs
+    

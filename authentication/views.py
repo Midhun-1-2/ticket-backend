@@ -90,7 +90,8 @@ class LoginView(APIView):
 
 class CreateMpinView(APIView):
     """POST { phone_number, password, mpin, confirm_mpin }
-    Re-verifies the password, creates the M-PIN, and logs the user in."""
+    Re-verifies the password and creates the M-PIN. Does NOT log the user
+    in — they must log in again using the new M-PIN."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -108,7 +109,10 @@ class CreateMpinView(APIView):
         mpin_obj, _ = Mpin.objects.get_or_create(user=user)
         mpin_obj.set_mpin(data["mpin"])
 
-        return Response(issue_tokens(user))
+        return Response({
+            "success": True,
+            "detail": "M-PIN created successfully. Please log in with your M-PIN.",
+        })
 
 
 class DetectRoleView(APIView):

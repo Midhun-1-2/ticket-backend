@@ -1,11 +1,30 @@
 from django.contrib.auth import get_user_model
-from rest_framework.permissions import AllowAny
+from django.db import transaction
+from django.utils import timezone
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Mpin
-from .serializers import LoginInputSerializer, MpinCreateSerializer, RoleDetectSerializer
+from .models import Company, Mpin
+from .permissions import IsAdminOrStaff
+from .serializers import (
+    CompanyDetailSerializer,
+    CompanyDraftSerializer,
+    CompanyListSerializer,
+    CompanyRejectSerializer,
+    CompanySubmitSerializer,
+    LoginInputSerializer,
+    MpinCreateSerializer,
+    RoleDetectSerializer,
+)
+from .utils import (
+    generate_company_code,
+    generate_temp_password,
+    send_approval_email,
+    send_registration_received_email,
+    send_rejection_email,
+)
 
 User = get_user_model()
 
@@ -100,3 +119,152 @@ class DetectRoleView(APIView):
         serializer = RoleDetectSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return Response(serializer.to_role_response())
+
+
+# ---------------------------------------------------------------------------
+# Onboarding — public draft/submit endpoints
+# ---------------------------------------------------------------------------
+
+class OnboardingDraftView(APIView):
+    """
+    POST { draft_token?, ...form fields, products: [...] }
+    Upserts a Company in DRAFT status. No account is created here.
+    Response: { draft_token }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = CompanyDraftSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        company = serializer.save_draft()
+        return Response({"draft_token": company.draft_token}, status=200)
+
+
+class OnboardingSubmitView(APIView):
+    """
+    POST { draft_token?, ...all form fields, products: [...] }
+    Validates required fields, creates the (unapproved) CustomUser account,
+    finalises the Company as PENDING, and emails a "received" confirmation.
+    """
+    permission_classes = [AllowAny]
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = CompanySubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = dict(serializer.validated_data)
+
+        products_data = validated.pop("products", [])
+        draft_token = validated.pop("draft_token", None)
+
+        company = None
+        if draft_token:
+            company = Company.objects.filter(draft_token=draft_token).first()
+
+        if company:
+            for field, value in validated.items():
+                setattr(company, field, value)
+        else:
+            company = Company(**validated)
+
+        company.company_code = generate_company_code()
+        company.status = Company.Status.PENDING
+        company.submitted_at = timezone.now()
+
+        # Create the linked (unapproved) account. Login uses mobile number,
+        # matching the existing auth system's USERNAME_FIELD.
+        user = User.objects.create_user(
+            phone_number=company.mobile_number,
+            full_name=company.contact_name,
+            role=User.Role.CUSTOMER,
+        )
+        company.user = user
+        company.save()
+
+        company.products.all().delete()
+        for product in products_data:
+            company.products.create(**product)
+
+        send_registration_received_email(company)
+
+        return Response(
+            {
+                "company_code": company.company_code,
+                "status": company.status,
+                "message": "Registration submitted. Your account is pending admin approval.",
+            },
+            status=201,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Onboarding — admin/staff review endpoints
+# ---------------------------------------------------------------------------
+
+class PendingCompanyListView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        companies = Company.objects.filter(status=Company.Status.PENDING).order_by("-submitted_at")
+        return Response(CompanyListSerializer(companies, many=True).data)
+
+
+class CompanyDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request, company_id):
+        company = Company.objects.filter(id=company_id).first()
+        if not company:
+            return Response({"detail": "Not found."}, status=404)
+        return Response(CompanyDetailSerializer(company).data)
+
+
+class ApproveCompanyView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, company_id):
+        company = Company.objects.filter(id=company_id, status=Company.Status.PENDING).first()
+        if not company:
+            return Response({"detail": "Pending registration not found."}, status=404)
+        if not company.user:
+            return Response({"detail": "No linked account for this registration."}, status=400)
+
+        temp_password = generate_temp_password()
+        company.user.set_password(temp_password)
+        company.user.is_approved = True
+        company.user.save()
+
+        company.status = Company.Status.APPROVED
+        company.reviewed_at = timezone.now()
+        company.reviewed_by = request.user
+        company.save()
+
+        send_approval_email(company, temp_password)
+
+        return Response({"detail": "Company approved. Credentials emailed to customer."})
+
+
+class RejectCompanyView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, company_id):
+        company = Company.objects.filter(id=company_id, status=Company.Status.PENDING).first()
+        if not company:
+            return Response({"detail": "Pending registration not found."}, status=404)
+
+        serializer = CompanyRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get("reason", "")
+
+        company.status = Company.Status.REJECTED
+        company.reviewed_at = timezone.now()
+        company.reviewed_by = request.user
+        company.save()
+
+        if company.user:
+            company.user.is_active = False
+            company.user.save()
+
+        send_rejection_email(company, reason)
+
+        return Response({"detail": "Company rejected."})

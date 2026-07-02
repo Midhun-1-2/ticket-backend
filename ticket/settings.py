@@ -133,6 +133,18 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 
+# Email
+# https://docs.djangoproject.com/en/6.0/topics/email/
+#
+# Used by the onboarding flow to send the "registration received" email
+# on submit, and the "account approved" email (with login credentials)
+# once an admin approves a company. The console backend just prints
+# emails to the terminal running `manage.py runserver` — good enough for
+# development. Swap to an SMTP backend before going to production.
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'no-reply@ticketdesk.local'
+
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 

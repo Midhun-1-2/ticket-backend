@@ -1,3 +1,5 @@
+import uuid
+
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.core.validators import RegexValidator
@@ -17,7 +19,10 @@ class CustomUserManager(BaseUserManager):
         if not phone_number:
             raise ValueError("Phone number is required.")
         user = self.model(phone_number=phone_number, **extra_fields)
-        user.set_password(password)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
         user.save(using=self._db)
         return user
 
@@ -99,3 +104,119 @@ class Mpin(models.Model):
 
     def __str__(self):
         return f"MPIN for {self.user}"
+
+
+# ---------------------------------------------------------------------------
+# Onboarding (company signup) — Company & Product
+# ---------------------------------------------------------------------------
+
+class Company(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PENDING = "pending", "Pending Approval"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    class CompanyType(models.TextChoices):
+        PRIVATE_LIMITED = "Private Limited", "Private Limited"
+        PUBLIC_LIMITED = "Public Limited", "Public Limited"
+        LLP = "LLP", "LLP"
+        PARTNERSHIP = "Partnership", "Partnership"
+        SOLE_PROPRIETORSHIP = "Sole Proprietorship", "Sole Proprietorship"
+        GOVERNMENT = "Government", "Government"
+        NON_PROFIT = "Non-Profit", "Non-Profit"
+
+    class AmcStatus(models.TextChoices):
+        ACTIVE = "Active", "Active"
+        INACTIVE = "Inactive", "Inactive"
+        EXPIRED = "Expired", "Expired"
+        NOT_APPLICABLE = "Not Applicable", "Not Applicable"
+
+    # Identity / draft tracking ------------------------------------------------
+    # A draft is identified by this token before any user account exists.
+    draft_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
+
+    # Linked once the onboarding is submitted and an account is created.
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="company",
+    )
+
+    # Section A — Company Information -----------------------------------------
+    company_name = models.CharField(max_length=200, blank=True)
+    company_code = models.CharField(max_length=30, unique=True, null=True, blank=True)
+    company_type = models.CharField(max_length=30, choices=CompanyType.choices, blank=True)
+    gst_number = models.CharField(max_length=15, blank=True)
+    pan_number = models.CharField(max_length=10, blank=True)
+    website = models.URLField(blank=True)
+    industry_type = models.CharField(max_length=50, blank=True)
+    annual_turnover = models.CharField(max_length=30, blank=True)
+    employee_count = models.CharField(max_length=20, blank=True)
+
+    # Section B — Address Details ----------------------------------------------
+    address_line1 = models.CharField(max_length=255, blank=True)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    country = models.CharField(max_length=100, default="India", blank=True)
+    pincode = models.CharField(max_length=10, blank=True)
+
+    # Section C — Primary Contact Details ---------------------------------------
+    contact_name = models.CharField(max_length=150, blank=True)
+    designation = models.CharField(max_length=100, blank=True)
+    email = models.EmailField(blank=True)
+    mobile_number = models.CharField(max_length=10, validators=[phone_validator], blank=True)
+    phone_number = models.CharField(max_length=10, blank=True)
+    alternate_email = models.EmailField(blank=True)
+
+    # Section D — Additional Information ----------------------------------------
+    amc_status = models.CharField(max_length=20, choices=AmcStatus.choices, blank=True)
+    amc_start_date = models.DateField(null=True, blank=True)
+    amc_end_date = models.DateField(null=True, blank=True)
+    preferred_channel = models.CharField(max_length=30, blank=True)
+    preferred_time = models.CharField(max_length=30, blank=True)
+    remarks = models.TextField(max_length=250, blank=True)
+    products_in_use = models.JSONField(default=list, blank=True)
+    contract_ref_number = models.CharField(max_length=50, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_companies",
+    )
+
+    class Meta:
+        db_table = "companies"
+
+    def __str__(self):
+        return self.company_name or f"Draft {self.draft_token}"
+
+
+class Product(models.Model):
+    class SupportType(models.TextChoices):
+        AMC = "AMC", "AMC"
+        NON_AMC = "NON-AMC", "NON-AMC"
+        SAS = "SAS", "SAS"
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="products")
+    product_name = models.CharField(max_length=100)
+    product_version = models.CharField(max_length=30, blank=True)
+    activation_date = models.DateField(null=True, blank=True)
+    support_type = models.CharField(max_length=10, choices=SupportType.choices, default=SupportType.AMC)
+    remarks = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "company_products"
+
+    def __str__(self):
+        return f"{self.product_name} ({self.company.company_name})"

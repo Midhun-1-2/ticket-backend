@@ -50,7 +50,6 @@ class MpinCreateSerializer(serializers.Serializer):
         if attrs["mpin"] != attrs["confirm_mpin"]:
             raise serializers.ValidationError("M-PINs do not match.")
         return attrs
-<<<<<<< HEAD
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +191,3 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
 
 class CompanyRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
-=======
-    
->>>>>>> 708ed513a7026fe5d08ec211db8596e7a52df956

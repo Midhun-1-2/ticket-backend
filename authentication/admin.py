@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import CustomUser
+from .models import Company, CustomUser, Product
 
 
 @admin.register(CustomUser)
@@ -24,3 +24,20 @@ class CustomUserAdmin(UserAdmin):
             "fields": ("phone_number", "full_name", "role", "password1", "password2"),
         }),
     )
+
+
+class ProductInline(admin.TabularInline):
+    model = Product
+    extra = 0
+
+
+@admin.register(Company)
+class CompanyAdmin(admin.ModelAdmin):
+    list_display = (
+        "company_code", "company_name", "contact_name", "mobile_number",
+        "status", "submitted_at",
+    )
+    list_filter = ("status", "company_type", "amc_status")
+    search_fields = ("company_name", "company_code", "contact_name", "mobile_number", "email")
+    inlines = [ProductInline]
+    readonly_fields = ("draft_token", "company_code", "created_at", "updated_at")

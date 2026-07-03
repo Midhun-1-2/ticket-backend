@@ -67,7 +67,12 @@ class ProductSerializer(serializers.ModelSerializer):
 
 class CompanyDraftSerializer(serializers.ModelSerializer):
     """Every field is optional — used while the user is still filling the
-    form and clicks 'Save as Draft'."""
+    form and clicks 'Save as Draft'.
+
+    NOTE: the frontend no longer exposes a 'Save as Draft' button, but this
+    endpoint is left in place in case you want to bring drafts back later
+    (e.g. auto-save). It's unused by the current Onboarding.jsx.
+    """
     products = ProductSerializer(many=True, required=False)
     draft_token = serializers.UUIDField(required=False)
 
@@ -120,7 +125,8 @@ class CompanyDraftSerializer(serializers.ModelSerializer):
 
 class CompanySubmitSerializer(serializers.ModelSerializer):
     """Stricter version used on final submit — enforces the required fields
-    from the form spec."""
+    from the form spec, plus password/confirm_password for account creation.
+    """
     products = ProductSerializer(many=True, required=False)
     draft_token = serializers.UUIDField(required=False)
 
@@ -137,6 +143,10 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
     amc_status = serializers.ChoiceField(choices=Company.AmcStatus.choices)
     products_in_use = serializers.ListField(child=serializers.CharField(), min_length=1)
 
+    # Not model fields — used only to create the CustomUser account, then discarded.
+    password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
+
     class Meta:
         model = Company
         fields = [
@@ -148,7 +158,7 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
             "alternate_email",
             "amc_status", "amc_start_date", "amc_end_date", "preferred_channel",
             "preferred_time", "remarks", "products_in_use", "contract_ref_number",
-            "products",
+            "products", "password", "confirm_password",
         ]
 
     def validate_mobile_number(self, value):
@@ -159,6 +169,16 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
                 "An account with this mobile number already exists."
             )
         return value
+
+    def validate_phone_number(self, value):
+        if value and (not value.isdigit() or len(value) != 10):
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        return value
+
+    def validate(self, attrs):
+        if attrs.get("password") != attrs.get("confirm_password"):
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+        return attrs
 
 
 class CompanyListSerializer(serializers.ModelSerializer):

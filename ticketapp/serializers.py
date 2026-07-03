@@ -1,11 +1,11 @@
 from rest_framework import serializers
-from .models import Category
+from .models import Category, Ticket, TicketAttachment
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = ['id', 'name', 'description', 'priority', 'is_active', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_name(self, value):
         value = value.strip()
@@ -16,4 +16,48 @@ class CategorySerializer(serializers.ModelSerializer):
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
             raise serializers.ValidationError("A category with this name already exists.")
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Tickets
+# ---------------------------------------------------------------------------
+
+class TicketAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TicketAttachment
+        fields = ['id', 'file', 'uploaded_at']
+        read_only_fields = ['id', 'uploaded_at']
+
+
+class RaisedBySerializer(serializers.Serializer):
+    """Minimal read-only view of the user who raised the ticket."""
+    phone_number = serializers.CharField()
+    full_name = serializers.CharField()
+    role = serializers.CharField()
+
+
+class TicketSerializer(serializers.ModelSerializer):
+    # Frontend's category dropdown sends the category NAME as the value
+    # (see <option value={c.name}>), so this matches on name rather than id
+    # — no frontend changes needed. Only active categories are selectable.
+    category = serializers.SlugRelatedField(
+        slug_field='name',
+        queryset=Category.objects.filter(is_active=True),
+    )
+    attachments = TicketAttachmentSerializer(many=True, read_only=True)
+    raised_by = RaisedBySerializer(read_only=True)
+
+    class Meta:
+        model = Ticket
+        fields = [
+            'id', 'subject', 'category', 'priority', 'description', 'product',
+            'status', 'raised_by', 'attachments', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'status', 'raised_by', 'created_at', 'updated_at']
+
+    def validate_subject(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Subject is required.")
         return value

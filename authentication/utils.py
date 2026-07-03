@@ -15,6 +15,9 @@ def generate_company_code():
 
 
 def generate_temp_password(length=10):
+    """Kept for reference / possible future use (e.g. admin-initiated
+    password resets). No longer used in the onboarding approval flow now
+    that customers set their own password at signup."""
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
@@ -31,24 +34,25 @@ def send_registration_received_email(company):
         f"Hi {company.contact_name or ''},\n\n"
         f"Thanks for registering {company.company_name} with Ticket Desk.\n"
         f"Your registration (reference {company.company_code}) is now under review.\n"
-        "You'll receive another email with your login credentials once an "
-        "admin approves the account.\n\n"
+        "You'll receive another email once an admin approves the account — "
+        "after that you can log in with the mobile number and password you "
+        "just set.\n\n"
         "— Ticket Desk"
     )
     send_mail(subject, message, _from_email(), [company.email], fail_silently=True)
 
 
-def send_approval_email(company, temp_password):
+def send_approval_email(company):
     if not company.email or not company.user:
         return
     subject = "Ticket Desk — Your account has been approved"
     message = (
         f"Hi {company.contact_name or ''},\n\n"
         f"Good news — {company.company_name} has been approved on Ticket Desk.\n\n"
-        f"Login phone number: {company.user.phone_number}\n"
-        f"Temporary password: {temp_password}\n\n"
-        "Please log in and set your M-PIN on first login. We recommend "
-        "changing your password after logging in.\n\n"
+        f"You can now log in with:\n"
+        f"Phone number: {company.user.phone_number}\n"
+        "Password: the one you set during registration\n\n"
+        "Please log in and set your M-PIN on first login.\n\n"
         "— Ticket Desk"
     )
     send_mail(subject, message, _from_email(), [company.email], fail_silently=True)

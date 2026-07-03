@@ -20,7 +20,6 @@ from .serializers import (
 )
 from .utils import (
     generate_company_code,
-    generate_temp_password,
     send_approval_email,
     send_registration_received_email,
     send_rejection_email,
@@ -134,6 +133,9 @@ class OnboardingDraftView(APIView):
     POST { draft_token?, ...form fields, products: [...] }
     Upserts a Company in DRAFT status. No account is created here.
     Response: { draft_token }
+
+    NOTE: unused by the current frontend (Save as Draft was removed from
+    the UI), left in place in case you want to reintroduce drafts later.
     """
     permission_classes = [AllowAny]
 
@@ -146,9 +148,10 @@ class OnboardingDraftView(APIView):
 
 class OnboardingSubmitView(APIView):
     """
-    POST { draft_token?, ...all form fields, products: [...] }
-    Validates required fields, creates the (unapproved) CustomUser account,
-    finalises the Company as PENDING, and emails a "received" confirmation.
+    POST { ...all form fields, password, confirm_password, products: [...] }
+    Validates required fields, creates the (unapproved) CustomUser account
+    using the password supplied in the form, finalises the Company as
+    PENDING, and emails a "received" confirmation.
     """
     permission_classes = [AllowAny]
 
@@ -160,6 +163,8 @@ class OnboardingSubmitView(APIView):
 
         products_data = validated.pop("products", [])
         draft_token = validated.pop("draft_token", None)
+        password = validated.pop("password")
+        validated.pop("confirm_password")
 
         company = None
         if draft_token:
@@ -175,10 +180,12 @@ class OnboardingSubmitView(APIView):
         company.status = Company.Status.PENDING
         company.submitted_at = timezone.now()
 
-        # Create the linked (unapproved) account. Login uses mobile number,
-        # matching the existing auth system's USERNAME_FIELD.
+        # Create the linked (unapproved) account with the password the
+        # customer set on the form. Login uses mobile number, matching the
+        # existing auth system's USERNAME_FIELD.
         user = User.objects.create_user(
             phone_number=company.mobile_number,
+            password=password,
             full_name=company.contact_name,
             role=User.Role.CUSTOMER,
         )
@@ -224,6 +231,8 @@ class CompanyDetailView(APIView):
 
 
 class ApproveCompanyView(APIView):
+    """The customer already set their own password at signup, so approval
+    just unlocks login — no password is generated or emailed here."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, company_id):
@@ -233,8 +242,6 @@ class ApproveCompanyView(APIView):
         if not company.user:
             return Response({"detail": "No linked account for this registration."}, status=400)
 
-        temp_password = generate_temp_password()
-        company.user.set_password(temp_password)
         company.user.is_approved = True
         company.user.save()
 
@@ -243,9 +250,9 @@ class ApproveCompanyView(APIView):
         company.reviewed_by = request.user
         company.save()
 
-        send_approval_email(company, temp_password)
+        send_approval_email(company)
 
-        return Response({"detail": "Company approved. Credentials emailed to customer."})
+        return Response({"detail": "Company approved. The customer can now log in."})
 
 
 class RejectCompanyView(APIView):

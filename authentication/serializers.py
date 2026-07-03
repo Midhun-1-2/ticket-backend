@@ -2,6 +2,8 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Company, Product
+from .models import StaffRole  
+
 
 User = get_user_model()
 
@@ -211,3 +213,108 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
 
 class CompanyRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
+
+# ---------------------------------------------------------------------------
+# Staff Management
+# ---------------------------------------------------------------------------
+
+
+
+class StaffRoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StaffRole
+        fields = ["id", "name"]
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Role name cannot be blank.")
+        return value
+
+
+class StaffListSerializer(serializers.ModelSerializer):
+    """Read shape — matches the frontend's expected keys directly."""
+    name = serializers.CharField(source="full_name")
+    phone = serializers.CharField(source="phone_number")
+    role = serializers.SerializerMethodField()
+    ticketsAssigned = serializers.IntegerField(source="tickets_assigned")
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "name", "email", "phone", "department", "role", "ticketsAssigned", "status"]
+
+    def get_role(self, obj):
+        return obj.designation.name if obj.designation else ""
+
+    def get_status(self, obj):
+        return "active" if obj.is_active else "inactive"
+
+
+class StaffCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=10, min_length=10)
+    department = serializers.CharField(max_length=50)
+    role = serializers.CharField(max_length=100)
+    password = serializers.CharField(min_length=4)
+
+    def validate_phone(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        if User.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError("An account with this phone number already exists.")
+        return value
+
+    def validate_role(self, value):
+        if not StaffRole.objects.filter(name=value).exists():
+            raise serializers.ValidationError("Unknown role/designation. Add it first.")
+        return value
+
+    def create(self, validated_data):
+        designation = StaffRole.objects.get(name=validated_data["role"])
+        return User.objects.create_user(
+            phone_number=validated_data["phone"],
+            password=validated_data["password"],
+            full_name=validated_data["name"],
+            email=validated_data["email"],
+            department=validated_data["department"],
+            designation=designation,
+            role=User.Role.STAFF,
+            is_approved=True,
+        )
+
+
+class StaffUpdateSerializer(serializers.Serializer):
+    """All fields optional — used with partial=True for PATCH."""
+    name = serializers.CharField(max_length=150, required=False)
+    email = serializers.EmailField(required=False)
+    phone = serializers.CharField(max_length=10, min_length=10, required=False)
+    department = serializers.CharField(max_length=50, required=False)
+    role = serializers.CharField(max_length=100, required=False)
+
+    def validate_phone(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        if User.objects.filter(phone_number=value).exclude(id=self.instance.id).exists():
+            raise serializers.ValidationError("Another account already uses this phone number.")
+        return value
+
+    def validate_role(self, value):
+        if not StaffRole.objects.filter(name=value).exists():
+            raise serializers.ValidationError("Unknown role/designation. Add it first.")
+        return value
+
+    def update(self, instance, validated_data):
+        if "name" in validated_data:
+            instance.full_name = validated_data["name"]
+        if "email" in validated_data:
+            instance.email = validated_data["email"]
+        if "phone" in validated_data:
+            instance.phone_number = validated_data["phone"]
+        if "department" in validated_data:
+            instance.department = validated_data["department"]
+        if "role" in validated_data:
+            instance.designation = StaffRole.objects.get(name=validated_data["role"])
+        instance.save()
+        return instance

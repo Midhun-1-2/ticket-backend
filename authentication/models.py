@@ -12,6 +12,25 @@ phone_validator = RegexValidator(
 )
 
 
+# ---------------------------------------------------------------------------
+# Staff roles / designations (e.g. "Support Agent", "Team Lead") — separate
+# from CustomUser.role (customer/staff/admin, the account TYPE). This is the
+# job title shown in the Staff Management UI's "Role" column and the
+# "Add Role/Designation" modal.
+# ---------------------------------------------------------------------------
+
+class StaffRole(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "staff_roles"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class CustomUserManager(BaseUserManager):
     use_in_migrations = True
 
@@ -29,6 +48,7 @@ class CustomUserManager(BaseUserManager):
     def create_user(self, phone_number, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
+        extra_fields.setdefault("is_active", True)
         extra_fields.setdefault("role", CustomUser.Role.CUSTOMER)
         # New signups (customer or staff) require admin approval by default.
         extra_fields.setdefault("is_approved", False)
@@ -58,7 +78,21 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         max_length=10, unique=True, validators=[phone_validator]
     )
     full_name = models.CharField(max_length=150, blank=True)
+    email = models.EmailField(blank=True)
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.CUSTOMER)
+
+    # Populated for Role.STAFF accounts only (created via Staff Management).
+    department = models.CharField(max_length=50, blank=True)
+    designation = models.ForeignKey(
+        StaffRole,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_members",
+    )
+    # Simple counter for now — swap to a computed value (e.g. Ticket.objects
+    # .filter(assigned_to=user).count()) once a Ticket model exists.
+    tickets_assigned = models.PositiveIntegerField(default=0)
 
     # Approval workflow (Admin approves new accounts before login is allowed)
     is_approved = models.BooleanField(default=False)
@@ -132,12 +166,9 @@ class Company(models.Model):
         EXPIRED = "Expired", "Expired"
         NOT_APPLICABLE = "Not Applicable", "Not Applicable"
 
-    # Identity / draft tracking ------------------------------------------------
-    # A draft is identified by this token before any user account exists.
     draft_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
 
-    # Linked once the onboarding is submitted and an account is created.
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -146,7 +177,6 @@ class Company(models.Model):
         related_name="company",
     )
 
-    # Section A — Company Information -----------------------------------------
     company_name = models.CharField(max_length=200, blank=True)
     company_code = models.CharField(max_length=30, unique=True, null=True, blank=True)
     company_type = models.CharField(max_length=30, choices=CompanyType.choices, blank=True)
@@ -157,7 +187,6 @@ class Company(models.Model):
     annual_turnover = models.CharField(max_length=30, blank=True)
     employee_count = models.CharField(max_length=20, blank=True)
 
-    # Section B — Address Details ----------------------------------------------
     address_line1 = models.CharField(max_length=255, blank=True)
     address_line2 = models.CharField(max_length=255, blank=True)
     city = models.CharField(max_length=100, blank=True)
@@ -165,7 +194,6 @@ class Company(models.Model):
     country = models.CharField(max_length=100, default="India", blank=True)
     pincode = models.CharField(max_length=10, blank=True)
 
-    # Section C — Primary Contact Details ---------------------------------------
     contact_name = models.CharField(max_length=150, blank=True)
     designation = models.CharField(max_length=100, blank=True)
     email = models.EmailField(blank=True)
@@ -173,7 +201,6 @@ class Company(models.Model):
     phone_number = models.CharField(max_length=10, blank=True)
     alternate_email = models.EmailField(blank=True)
 
-    # Section D — Additional Information ----------------------------------------
     amc_status = models.CharField(max_length=20, choices=AmcStatus.choices, blank=True)
     amc_start_date = models.DateField(null=True, blank=True)
     amc_end_date = models.DateField(null=True, blank=True)

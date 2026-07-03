@@ -5,6 +5,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from .models import StaffRole  # add alongside `from .models import Company, Mpin`
 
 from .models import Company, Mpin
 from .permissions import IsAdminOrStaff
@@ -17,6 +18,10 @@ from .serializers import (
     LoginInputSerializer,
     MpinCreateSerializer,
     RoleDetectSerializer,
+    StaffCreateSerializer,
+    StaffListSerializer,
+    StaffRoleSerializer,
+    StaffUpdateSerializer,
 )
 from .utils import (
     generate_company_code,
@@ -48,6 +53,7 @@ class LoginView(APIView):
       { access, refresh, role, phone_number, full_name }   success
       { mpin_required: true }                              password correct, no M-PIN set yet
       { detail: "pending_approval" }                        account not yet approved
+      { detail: "account_deactivated" }                     account has been deactivated
       { detail: "..." }                                     invalid credentials
     """
     permission_classes = [AllowAny]
@@ -77,6 +83,9 @@ class LoginView(APIView):
             if not user.check_password(password):
                 return Response({"detail": "Incorrect phone number or password."}, status=400)
 
+        if not user.is_active:
+            return Response({"detail": "account_deactivated"}, status=403)
+
         if not user.is_approved:
             return Response({"detail": "pending_approval"}, status=403)
 
@@ -85,7 +94,6 @@ class LoginView(APIView):
             return Response({"mpin_required": True})
 
         return Response(issue_tokens(user))
-
 
 class CreateMpinView(APIView):
     """POST { phone_number, password, mpin, confirm_mpin }
@@ -279,3 +287,72 @@ class RejectCompanyView(APIView):
         send_rejection_email(company, reason)
 
         return Response({"detail": "Company rejected."})
+    
+# ---------------------------------------------------------------------------
+# Staff Management
+# ---------------------------------------------------------------------------
+
+class StaffListCreateView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        staff = User.objects.filter(role=User.Role.STAFF).select_related("designation").order_by("full_name")
+        return Response(StaffListSerializer(staff, many=True).data)
+
+    def post(self, request):
+        serializer = StaffCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(StaffListSerializer(user).data, status=201)
+
+
+class StaffDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def patch(self, request, staff_id):
+        user = User.objects.filter(id=staff_id, role=User.Role.STAFF).first()
+        if not user:
+            return Response({"detail": "Staff member not found."}, status=404)
+        serializer = StaffUpdateSerializer(user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(StaffListSerializer(user).data)
+
+
+class StaffToggleStatusView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, staff_id):
+        user = User.objects.filter(id=staff_id, role=User.Role.STAFF).first()
+        if not user:
+            return Response({"detail": "Staff member not found."}, status=404)
+        user.is_active = not user.is_active
+        user.save()
+        return Response(StaffListSerializer(user).data)
+
+
+class StaffRoleListCreateView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        return Response(StaffRoleSerializer(StaffRole.objects.all(), many=True).data)
+
+    def post(self, request):
+        serializer = StaffRoleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        name = serializer.validated_data["name"]
+        if StaffRole.objects.filter(name__iexact=name).exists():
+            return Response({"detail": "This role already exists."}, status=400)
+        serializer.save()
+        return Response(serializer.data, status=201)
+
+
+class StaffRoleDeleteView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def delete(self, request, role_id):
+        role = StaffRole.objects.filter(id=role_id).first()
+        if not role:
+            return Response({"detail": "Role not found."}, status=404)
+        role.delete()
+        return Response(status=204)

@@ -197,6 +197,8 @@ class Company(models.Model):
 
     class Meta:
         db_table = "companies"
+        verbose_name = "Company"
+        verbose_name_plural = "Companies"
 
     def __str__(self):
         return self.company_name or f"Draft {self.draft_token}"

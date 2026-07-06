@@ -4,8 +4,10 @@ __pycache__/
 env/
 
 # Django
-db.sqlite3
+*.sqlite3
+*.sqlite3-journal
 *.log
+media/
 
 # Editor
 .vscode/

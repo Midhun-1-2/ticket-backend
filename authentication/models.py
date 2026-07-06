@@ -210,6 +210,18 @@ class Company(models.Model):
     products_in_use = models.JSONField(default=list, blank=True)
     contract_ref_number = models.CharField(max_length=50, blank=True)
 
+    # ---------------------------------------------------------------------
+    # Account Approvals review workflow — Step B (Product Verification)
+    # persistence. Keyed by product name so it lines up directly with
+    # `products_in_use` (a plain list of name strings, not FK'd Product
+    # rows), e.g.:
+    #   {"Ticket Desk Pro": "Verified", "Billing Suite": "Needs Clarification"}
+    # A single free-text note covers the whole registration rather than
+    # per-product, matching how the frontend's Step B form is laid out.
+    # ---------------------------------------------------------------------
+    product_verification = models.JSONField(default=dict, blank=True)
+    verification_note = models.TextField(blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
@@ -249,3 +261,38 @@ class Product(models.Model):
 
     def __str__(self):
         return f"{self.product_name} ({self.company.company_name})"
+    
+# ---------------------------------------------------------------------------
+# Staff assignment history — created when an admin confirms staff assignment
+# during Account Approvals (Step C). History is kept: reassigning doesn't
+# delete old rows, it marks them is_current=False and inserts new ones.
+# ---------------------------------------------------------------------------
+
+class StaffAssignment(models.Model):
+    company = models.ForeignKey(
+        Company, on_delete=models.CASCADE, related_name="staff_assignments"
+    )
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="customer_assignments"
+    )
+    # Empty string = "primary staff for the whole company" (assignMode="primary").
+    # A product name = "staff for this specific product" (assignMode="per-product").
+    product_name = models.CharField(max_length=100, blank=True)
+
+    is_current = models.BooleanField(default=True)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_assignments_made",
+    )
+
+    class Meta:
+        db_table = "staff_assignments"
+        ordering = ["-assigned_at"]
+
+    def __str__(self):
+        target = self.product_name or "all products"
+        return f"{self.staff} ← {self.company} ({target})"

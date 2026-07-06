@@ -195,6 +195,7 @@ class CompanyListSerializer(serializers.ModelSerializer):
 
 class CompanyDetailSerializer(serializers.ModelSerializer):
     products = ProductSerializer(many=True, read_only=True)
+    staff_assignment = serializers.SerializerMethodField()  # <-- added
 
     class Meta:
         model = Company
@@ -208,12 +209,66 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
             "amc_status", "amc_start_date", "amc_end_date", "preferred_channel",
             "preferred_time", "remarks", "products_in_use", "contract_ref_number",
             "products", "submitted_at", "reviewed_at",
+            "product_verification", "verification_note",
+            "staff_assignment",  # <-- added
         ]
 
+    def get_staff_assignment(self, obj):
+        current = obj.staff_assignments.filter(is_current=True).select_related("staff")
+        if not current.exists():
+            return None
+
+        primary_rows = current.filter(product_name="")
+        if primary_rows.exists():
+            return {
+                "mode": "primary",
+                "primary_staff_ids": [row.staff_id for row in primary_rows],
+                "primary_staff": [
+                    {"id": row.staff_id, "name": row.staff.full_name} for row in primary_rows
+                ],
+            }
+
+        per_product = {}
+        for row in current.exclude(product_name=""):
+            per_product.setdefault(row.product_name, []).append(
+                {"id": row.staff_id, "name": row.staff.full_name}
+            )
+        return {"mode": "per-product", "per_product": per_product}
 
 class CompanyRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
+class ProductVerificationSerializer(serializers.Serializer):
+    """Accepts { product_verification: {name: status}, verification_note }"""
+    VALID_STATUSES = ["Verified", "Needs Clarification", "Not Found in Records"]
+
+    product_verification = serializers.DictField(
+        child=serializers.ChoiceField(choices=VALID_STATUSES), required=False
+    )
+    verification_note = serializers.CharField(required=False, allow_blank=True)
+
+class StaffAssignmentSaveSerializer(serializers.Serializer):
+    """Accepts either:
+      { mode: "primary", primary_staff_ids: [5, 8] }
+    or
+      { mode: "per-product", per_product: {"Ticket Desk Pro": [5, 8], "Billing Suite": [3]} }
+    Multiple staff can be assigned to the same target — no single "main" contact.
+    """
+    mode = serializers.ChoiceField(choices=["primary", "per-product"])
+    primary_staff_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_empty=False
+    )
+    per_product = serializers.DictField(
+        child=serializers.ListField(child=serializers.IntegerField(), allow_empty=False),
+        required=False,
+    )
+
+    def validate(self, attrs):
+        if attrs["mode"] == "primary" and not attrs.get("primary_staff_ids"):
+            raise serializers.ValidationError("primary_staff_ids is required for primary mode.")
+        if attrs["mode"] == "per-product" and not attrs.get("per_product"):
+            raise serializers.ValidationError("per_product is required for per-product mode.")
+        return attrs
 
 # ---------------------------------------------------------------------------
 # Staff Management
@@ -238,16 +293,42 @@ class StaffListSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     ticketsAssigned = serializers.IntegerField(source="tickets_assigned")
     status = serializers.SerializerMethodField()
+    assignedCustomers = serializers.SerializerMethodField()  # <-- added
 
     class Meta:
         model = User
-        fields = ["id", "name", "email", "phone", "department", "role", "ticketsAssigned", "status"]
+        fields = [
+            "id", "name", "email", "phone", "department", "role",
+            "ticketsAssigned", "status", "assignedCustomers",  # <-- added
+        ]
 
     def get_role(self, obj):
         return obj.designation.name if obj.designation else ""
 
     def get_status(self, obj):
         return "active" if obj.is_active else "inactive"
+
+    def get_assignedCustomers(self, obj):
+        # Counts distinct APPROVED companies currently assigned to this
+        # staff member — either as primary (product_name="") or for any
+        # specific product. distinct() avoids double-counting a company
+        # that has this staff assigned across multiple products.
+        from .models import Company  # local import avoids circular import issues
+        return (
+            obj.customer_assignments
+            .filter(is_current=True, company__status=Company.Status.APPROVED)
+            .values("company")
+            .distinct()
+            .count()
+        )
+    
+class StaffAssignedCustomerSerializer(serializers.Serializer):
+    """Used by the Staff Management detail slide-over — lists the
+    companies currently assigned to a given staff member."""
+    company_id = serializers.IntegerField(source="company.id")
+    company_name = serializers.CharField(source="company.company_name")
+    product_name = serializers.CharField()  # "" means primary / all products
+    assigned_at = serializers.DateTimeField()
 
 
 class StaffCreateSerializer(serializers.Serializer):

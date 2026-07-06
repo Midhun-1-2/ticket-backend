@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
+from rest_framework import generics, permissions, status as http_status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -22,6 +24,9 @@ from .serializers import (
     StaffListSerializer,
     StaffRoleSerializer,
     StaffUpdateSerializer,
+    CustomerListSerializer,
+    CustomerDetailSerializer,
+    CustomerUpdateSerializer,
 )
 from .utils import (
     generate_company_code,
@@ -356,3 +361,75 @@ class StaffRoleDeleteView(APIView):
             return Response({"detail": "Role not found."}, status=404)
         role.delete()
         return Response(status=204)
+    
+class CustomerListView(generics.ListAPIView):
+    """
+    GET /customers/?search=...&status=active|pending|blocked
+    Admin/staff only. Lists all customer-role accounts with search + filter.
+    """
+    serializer_class = CustomerListSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+
+    def get_queryset(self):
+        qs = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
+        params = self.request.query_params
+
+        search = params.get("search", "").strip()
+        if search:
+            qs = qs.filter(
+                Q(full_name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(phone_number__icontains=search)
+                | Q(company__company_name__icontains=search)
+            )
+
+        status_param = params.get("status")
+        if status_param == "active":
+            qs = qs.filter(is_active=True, is_approved=True)
+        elif status_param == "pending":
+            qs = qs.filter(is_approved=False, is_active=True)
+        elif status_param == "blocked":
+            qs = qs.filter(is_active=False)
+
+        return qs.order_by("-date_joined")
+
+
+class CustomerDetailView(generics.RetrieveUpdateAPIView):
+    """
+    GET   /customers/<id>/   — full detail for the View panel
+    PATCH /customers/<id>/   — Edit action (name/email/phone only)
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    queryset = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
+
+    def get_serializer_class(self):
+        if self.request.method == "PATCH":
+            return CustomerUpdateSerializer
+        return CustomerDetailSerializer
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        # Respond with the full detail shape so the frontend can refresh the row in-place.
+        return Response(CustomerDetailSerializer(instance).data)
+
+
+class CustomerDeactivateView(APIView):
+    """
+    PATCH /customers/<id>/deactivate/
+    Toggles is_active. A blocked customer is reactivated by calling this
+    again (the frontend button label flips between "Deactivate" / "Activate").
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+
+    def patch(self, request, pk):
+        try:
+            customer = User.objects.get(pk=pk, role=User.Role.CUSTOMER)
+        except User.DoesNotExist:
+            return Response({"detail": "Customer not found."}, status=http_status.HTTP_404_NOT_FOUND)
+
+        customer.is_active = not customer.is_active
+        customer.save(update_fields=["is_active"])
+        return Response(CustomerDetailSerializer(customer).data)

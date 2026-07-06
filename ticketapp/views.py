@@ -22,8 +22,15 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        instance.is_active = False
-        instance.save(update_fields=['is_active'])
+        # Categories referenced by any ticket can't be removed — the FK is
+        # PROTECT anyway (see Ticket.category), so this just gives a clean
+        # 409 with a message instead of letting an IntegrityError bubble up.
+        if instance.tickets.exists():
+            return Response(
+                {"detail": "This category is in use by existing tickets and cannot be deleted."},
+                status=409,
+            )
+        instance.delete()
         return Response(status=204)
 
 

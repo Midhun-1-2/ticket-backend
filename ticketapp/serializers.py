@@ -2,10 +2,19 @@ from rest_framework import serializers
 from .models import Category, Ticket, TicketAttachment
 
 class CategorySerializer(serializers.ModelSerializer):
+    # Tells the frontend whether this category is referenced by any ticket,
+    # so the delete button can be locked instead of letting the request
+    # round-trip into a 409 (the FK is PROTECT, so a hard delete would fail
+    # anyway if this were ever out of sync).
+    in_use = serializers.SerializerMethodField()
+
     class Meta:
         model = Category
-        fields = ['id', 'name', 'description', 'priority', 'is_active', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'description', 'priority', 'is_active', 'in_use', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_in_use(self, obj):
+        return obj.tickets.exists()
 
     def validate_name(self, value):
         value = value.strip()

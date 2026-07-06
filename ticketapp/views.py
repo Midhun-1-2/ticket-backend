@@ -13,6 +13,10 @@ from .models import Category, Ticket, TicketAssignment
 from .serializers import CategorySerializer, TicketSerializer, TicketAssignmentSerializer
 
 User = get_user_model()
+from authentication.permissions import IsAdmin
+from rest_framework.permissions import AllowAny
+from .models import Category, Ticket, ProductMaster
+from .serializers import CategorySerializer, TicketSerializer, ProductMasterSerializer,PublicProductSerializer
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -236,3 +240,38 @@ class DeclineTicketAssignmentView(APIView):
         assignment.save(update_fields=['status', 'responded_at'])
         return Response(TicketAssignmentSerializer(assignment).data)
     
+    
+
+
+
+class ProductMasterListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /products/   — admin only. ?include_inactive=true to see disabled products too.
+    POST /products/   — {name, version, activation_date}
+    """
+    serializer_class = ProductMasterSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get_queryset(self):
+        qs = ProductMaster.objects.all()
+        if self.request.query_params.get('include_inactive') != 'true':
+            qs = qs.filter(is_active=True)
+        return qs
+
+
+class ProductMasterDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET/PATCH/PUT/DELETE /products/<uuid>/ — admin only."""
+    serializer_class = ProductMasterSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    queryset = ProductMaster.objects.all()
+
+class PublicProductListView(generics.ListAPIView):
+    """
+    GET /public-products/ — public, unauthenticated, read-only.
+    Used by the customer registration form (Onboarding.jsx) to populate
+    the product picker before the user has an account. Only exposes
+    active products, and only id/name/version — nothing sensitive.
+    """
+    serializer_class = PublicProductSerializer
+    permission_classes = [AllowAny]
+    queryset = ProductMaster.objects.filter(is_active=True)

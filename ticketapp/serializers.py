@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from .models import Category, Ticket, TicketAttachment, TicketAssignment
 
+from .models import Category, Ticket, TicketAttachment
+from .models import Category, Ticket, TicketAttachment, ProductMaster
 
 class CategorySerializer(serializers.ModelSerializer):
     # Tells the frontend whether this category is referenced by any ticket,
@@ -115,3 +117,31 @@ class TicketAssignmentSerializer(serializers.ModelSerializer):
         model = TicketAssignment
         fields = ['id', 'ticket', 'staff', 'status', 'offered_at', 'responded_at']
         read_only_fields = fields
+    
+
+
+
+class ProductMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductMaster
+        fields = ['id', 'name', 'version', 'activation_date', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Product name is required.")
+        qs = ProductMaster.objects.filter(name__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A product with this name already exists.")
+        return value
+
+class PublicProductSerializer(serializers.ModelSerializer):
+    """Minimal, public-safe shape — used by customer registration
+    (Onboarding.jsx) before the user has an account. Exposes only what's
+    needed to populate a product picker."""
+    class Meta:
+        model = ProductMaster
+        fields = ['id', 'name', 'version']

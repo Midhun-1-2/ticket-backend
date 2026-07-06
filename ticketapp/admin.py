@@ -1,6 +1,8 @@
 from django.contrib import admin
 from .models import Category, Ticket, TicketAttachment, TicketAssignment
 
+from .models import Category, Ticket, TicketAttachment, ProductMaster
+
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
@@ -50,3 +52,6 @@ class TicketAssignmentAdmin(admin.ModelAdmin):
     )
     autocomplete_fields = ('ticket', 'staff')
     readonly_fields = ('offered_at',)
+    inlines = [TicketAttachmentInline]
+
+admin.site.register(ProductMaster)

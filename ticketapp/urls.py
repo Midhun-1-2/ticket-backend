@@ -9,6 +9,9 @@ from .views import (
     TicketAssignmentPendingCountView,
     AcceptTicketAssignmentView,
     DeclineTicketAssignmentView,
+    ProductMasterListCreateView,
+    ProductMasterDetailView,
+    PublicProductListView,
 )
 
 urlpatterns = [
@@ -23,4 +26,9 @@ urlpatterns = [
     path('ticket-assignments/pending-count/', TicketAssignmentPendingCountView.as_view(), name='ticket-assignment-pending-count'),
     path('ticket-assignments/<uuid:assignment_id>/accept/', AcceptTicketAssignmentView.as_view(), name='ticket-assignment-accept'),
     path('ticket-assignments/<uuid:assignment_id>/decline/', DeclineTicketAssignmentView.as_view(), name='ticket-assignment-decline'),
+    path('products/', ProductMasterListCreateView.as_view(), name='product-list-create'),
+    path('products/<uuid:pk>/', ProductMasterDetailView.as_view(), name='product-detail'),
+
+    path('public-products/', PublicProductListView.as_view(), name='public-product-list'),
+
 ]

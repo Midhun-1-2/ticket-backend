@@ -149,6 +149,8 @@ class TicketAssignment(models.Model):
     def __str__(self):
         return f"{self.ticket_id} -> {self.staff} ({self.status})"
     
+    
+
 class ProductMaster(models.Model):
     """Admin-managed product catalog — distinct from authentication.Product,
     which records what a specific company has purchased/activated. This is

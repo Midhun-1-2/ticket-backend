@@ -80,6 +80,16 @@ class Ticket(models.Model):
         related_name='tickets_raised',
     )
 
+    # Set only once a staff member accepts an offer via TicketAssignment
+    # (see AcceptTicketAssignmentView). Null means no one has claimed it yet.
+    assigned_staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tickets_assigned_to',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -98,3 +108,43 @@ class TicketAttachment(models.Model):
 
     def __str__(self):
         return self.file.name
+
+
+# ---------------------------------------------------------------------------
+# Ticket Assignment — offer / accept / decline
+# ---------------------------------------------------------------------------
+
+class TicketAssignment(models.Model):
+    """
+    One row per (ticket, staff) offer. When a ticket is raised, we create a
+    'pending' row for every staff member currently tied to the customer's
+    company (via authentication.StaffAssignment — primary or per-product).
+    Whoever accepts first wins the ticket; every other pending row for that
+    ticket flips to 'unavailable' in the same transaction (see
+    AcceptTicketAssignmentView), so there's no window where two staff can
+    both successfully claim the same ticket.
+    """
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('accepted', 'Accepted'),
+        ('declined', 'Declined'),
+        ('unavailable', 'Unavailable'),  # lost the race to another staff member
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='assignments')
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ticket_assignments'
+    )
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='pending')
+    offered_at = models.DateTimeField(auto_now_add=True)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-offered_at']
+        constraints = [
+            models.UniqueConstraint(fields=['ticket', 'staff'], name='unique_ticket_staff_offer')
+        ]
+
+    def __str__(self):
+        return f"{self.ticket_id} -> {self.staff} ({self.status})"

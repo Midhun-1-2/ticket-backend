@@ -10,6 +10,7 @@ urlpatterns = [
     path("login/refresh/", TokenRefreshView.as_view(), name="login-refresh"),
     path("detect-role/", views.DetectRoleView.as_view(), name="detect-role"),
     path("mpin/create/", views.CreateMpinView.as_view(), name="mpin-create"),
+    path('logout/', views.LogoutView.as_view(), name='logout'),
 
     # Onboarding — public
     path("onboarding/draft/", views.OnboardingDraftView.as_view(), name="onboarding-draft"),
@@ -36,4 +37,6 @@ urlpatterns = [
     path("customers/", CustomerListView.as_view(), name="customer-list"),
     path("customers/<int:pk>/", CustomerDetailView.as_view(), name="customer-detail"),
     path("customers/<int:pk>/deactivate/", CustomerDeactivateView.as_view(), name="customer-deactivate"),
+
+    path('my-products/', views.MyProductsView.as_view(), name='my-products'),
 ]

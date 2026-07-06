@@ -4,6 +4,11 @@ from .views import (
     CategoryDetailView,
     TicketListCreateView,
     TicketDetailView,
+    MyTicketAssignmentsView,
+    TicketAssignmentListView,
+    TicketAssignmentPendingCountView,
+    AcceptTicketAssignmentView,
+    DeclineTicketAssignmentView,
 )
 
 urlpatterns = [
@@ -12,5 +17,10 @@ urlpatterns = [
 
     path('tickets/', TicketListCreateView.as_view(), name='ticket-list-create'),
     path('tickets/<uuid:pk>/', TicketDetailView.as_view(), name='ticket-detail'),
-    
+
+    path('ticket-assignments/', TicketAssignmentListView.as_view(), name='ticket-assignment-list'),
+    path('ticket-assignments/mine/', MyTicketAssignmentsView.as_view(), name='ticket-assignment-mine'),
+    path('ticket-assignments/pending-count/', TicketAssignmentPendingCountView.as_view(), name='ticket-assignment-pending-count'),
+    path('ticket-assignments/<uuid:assignment_id>/accept/', AcceptTicketAssignmentView.as_view(), name='ticket-assignment-accept'),
+    path('ticket-assignments/<uuid:assignment_id>/decline/', DeclineTicketAssignmentView.as_view(), name='ticket-assignment-decline'),
 ]

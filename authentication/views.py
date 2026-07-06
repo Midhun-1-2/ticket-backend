@@ -7,9 +7,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import StaffRole  # add alongside `from .models import Company, Mpin`
+from rest_framework_simplejwt.exceptions import TokenError
 
-from .models import Company, Mpin,StaffAssignment
+from .models import Company, Mpin, StaffAssignment, StaffRole
 from .permissions import IsAdminOrStaff
 from .serializers import (
     CompanyDetailSerializer,
@@ -102,6 +102,7 @@ class LoginView(APIView):
             return Response({"mpin_required": True})
 
         return Response(issue_tokens(user))
+
 
 class CreateMpinView(APIView):
     """POST { phone_number, password, mpin, confirm_mpin }
@@ -270,6 +271,7 @@ class ApproveCompanyView(APIView):
 
         return Response({"detail": "Company approved. The customer can now log in."})
 
+
 class RevokeCompanyApprovalView(APIView):
     """Reverses an approval: sends the company back to PENDING and blocks
     the linked user from logging in again until re-approved. Use this
@@ -293,6 +295,7 @@ class RevokeCompanyApprovalView(APIView):
         company.save()
 
         return Response({"detail": "Approval revoked. This registration is back in the pending queue."})
+
 
 class RejectCompanyView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
@@ -318,7 +321,38 @@ class RejectCompanyView(APIView):
         send_rejection_email(company, reason)
 
         return Response({"detail": "Company rejected."})
-    
+
+
+class MyProductsView(APIView):
+    """
+    GET /my-products/
+    Returns the products THIS customer's company had verified/approved by
+    an admin during Account Approvals (Step B) — used to populate the
+    Product/Module dropdown on Raise New Ticket.
+
+    Staff/admin, or a customer whose company isn't approved yet, get an
+    empty list; the frontend always adds "Not Applicable" itself regardless.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if getattr(user, 'role', None) != User.Role.CUSTOMER:
+            return Response({"products": []})
+
+        company = getattr(user, 'company', None)
+        if not company or company.status != Company.Status.APPROVED:
+            return Response({"products": []})
+
+        verification = company.product_verification or {}
+        approved = [
+            name for name in company.products_in_use
+            if verification.get(name) == "Verified"
+        ]
+        return Response({"products": approved})
+
+
 class AssignStaffView(APIView):
     """POST { mode, primary_staff_ids? , per_product? }
     Saves Step C's staff assignment for a company. History is kept: any
@@ -371,7 +405,8 @@ class AssignStaffView(APIView):
                         )
 
         return Response(CompanyDetailSerializer(company).data)
-    
+
+
 class VerifyProductsView(APIView):
     """POST { product_verification: {name: status}, verification_note }
     Saves Step B's per-product verification and internal note against the
@@ -395,7 +430,8 @@ class VerifyProductsView(APIView):
         company.save()
 
         return Response(CompanyDetailSerializer(company).data)
-    
+
+
 # ---------------------------------------------------------------------------
 # Staff Management
 # ---------------------------------------------------------------------------
@@ -461,7 +497,8 @@ class StaffToggleStatusView(APIView):
         user.is_active = not user.is_active
         user.save()
         return Response(StaffListSerializer(user).data)
-    
+
+
 class StaffAssignedCustomersView(APIView):
     """GET — companies currently assigned to this staff member (primary or
     per-product), used by the Staff Management detail slide-over."""
@@ -506,7 +543,8 @@ class StaffRoleDeleteView(APIView):
             return Response({"detail": "Role not found."}, status=404)
         role.delete()
         return Response(status=204)
-    
+
+
 class CustomerListView(generics.ListAPIView):
     """
     GET /customers/?search=...&status=active|pending|blocked
@@ -578,3 +616,24 @@ class CustomerDeactivateView(APIView):
         customer.is_active = not customer.is_active
         customer.save(update_fields=["is_active"])
         return Response(CustomerDetailSerializer(customer).data)
+
+
+class LogoutView(APIView):
+    """POST { refresh } -> blacklists the refresh token so it can't be
+    used again, even if someone has a copy of it. Requires the access
+    token to still be valid (IsAuthenticated), which is normally the case
+    since this runs right before the user is kicked to /login/."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        refresh_token = request.data.get("refresh")
+        if not refresh_token:
+            return Response({"detail": "Refresh token is required."}, status=400)
+
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError:
+            return Response({"detail": "Invalid or already-expired token."}, status=400)
+
+        return Response({"detail": "Logged out successfully."})

@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Category, Ticket, TicketAttachment
+from .models import Category, Ticket, TicketAttachment, TicketAssignment
+
 
 class CategorySerializer(serializers.ModelSerializer):
     # Tells the frontend whether this category is referenced by any ticket,
@@ -40,7 +41,9 @@ class TicketAttachmentSerializer(serializers.ModelSerializer):
 
 
 class RaisedBySerializer(serializers.Serializer):
-    """Minimal read-only view of the user who raised the ticket."""
+    """Minimal read-only view of the user who raised the ticket. Also
+    reused for assigned_staff below since CustomUser has the same three
+    fields for staff accounts."""
     phone_number = serializers.CharField()
     full_name = serializers.CharField()
     role = serializers.CharField()
@@ -56,17 +59,59 @@ class TicketSerializer(serializers.ModelSerializer):
     )
     attachments = TicketAttachmentSerializer(many=True, read_only=True)
     raised_by = RaisedBySerializer(read_only=True)
+    assigned_staff = RaisedBySerializer(read_only=True)
 
     class Meta:
         model = Ticket
         fields = [
             'id', 'subject', 'category', 'priority', 'description', 'product',
-            'status', 'raised_by', 'attachments', 'created_at', 'updated_at',
+            'status', 'raised_by', 'assigned_staff', 'attachments',
+            'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'status', 'raised_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'status', 'raised_by', 'assigned_staff', 'created_at', 'updated_at']
 
     def validate_subject(self, value):
         value = value.strip()
         if not value:
             raise serializers.ValidationError("Subject is required.")
         return value
+
+
+# ---------------------------------------------------------------------------
+# Ticket Assignment — offer / accept / decline
+# ---------------------------------------------------------------------------
+
+class TicketAssignmentTicketSerializer(serializers.ModelSerializer):
+    """Compact ticket summary for assignment rows — avoids nesting the full
+    TicketSerializer (attachments, description, etc.) which this screen
+    doesn't need."""
+    category = serializers.CharField(source='category.name', read_only=True)
+    customer_name = serializers.CharField(source='raised_by.full_name', read_only=True, default='')
+    company_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Ticket
+        fields = [
+            'id', 'subject', 'category', 'priority', 'product', 'status',
+            'customer_name', 'company_name', 'created_at',
+        ]
+
+    def get_company_name(self, obj):
+        company = getattr(getattr(obj.raised_by, 'company', None), 'company_name', None)
+        return company or ''
+
+
+class StaffMiniSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    full_name = serializers.CharField()
+    phone_number = serializers.CharField()
+
+
+class TicketAssignmentSerializer(serializers.ModelSerializer):
+    ticket = TicketAssignmentTicketSerializer(read_only=True)
+    staff = StaffMiniSerializer(read_only=True)
+
+    class Meta:
+        model = TicketAssignment
+        fields = ['id', 'ticket', 'staff', 'status', 'offered_at', 'responded_at']
+        read_only_fields = fields

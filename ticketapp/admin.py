@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from .models import Category, Ticket, TicketAttachment
+from .models import Category, Ticket, TicketAttachment, ProductMaster
+
 
 admin.site.register(Category)
 
@@ -16,3 +17,5 @@ class TicketAdmin(admin.ModelAdmin):
     list_filter = ('status', 'priority', 'category')
     search_fields = ('subject', 'description')
     inlines = [TicketAttachmentInline]
+
+admin.site.register(ProductMaster)

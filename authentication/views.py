@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import StaffRole  # add alongside `from .models import Company, Mpin`
 
-from .models import Company, Mpin
+from .models import Company, Mpin,StaffAssignment
 from .permissions import IsAdminOrStaff
 from .serializers import (
     CompanyDetailSerializer,
@@ -27,6 +27,9 @@ from .serializers import (
     CustomerListSerializer,
     CustomerDetailSerializer,
     CustomerUpdateSerializer,
+    ProductVerificationSerializer,
+    StaffAssignmentSaveSerializer,
+    StaffAssignedCustomerSerializer,
 )
 from .utils import (
     generate_company_code,
@@ -267,6 +270,29 @@ class ApproveCompanyView(APIView):
 
         return Response({"detail": "Company approved. The customer can now log in."})
 
+class RevokeCompanyApprovalView(APIView):
+    """Reverses an approval: sends the company back to PENDING and blocks
+    the linked user from logging in again until re-approved. Use this
+    instead of hand-editing is_approved in the DB, since that leaves the
+    Company row silently out of sync with the pending queue."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, company_id):
+        company = Company.objects.filter(id=company_id, status=Company.Status.APPROVED).first()
+        if not company:
+            return Response({"detail": "Approved registration not found."}, status=404)
+        if not company.user:
+            return Response({"detail": "No linked account for this registration."}, status=400)
+
+        company.user.is_approved = False
+        company.user.save()
+
+        company.status = Company.Status.PENDING
+        company.reviewed_at = None
+        company.reviewed_by = None
+        company.save()
+
+        return Response({"detail": "Approval revoked. This registration is back in the pending queue."})
 
 class RejectCompanyView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
@@ -292,6 +318,83 @@ class RejectCompanyView(APIView):
         send_rejection_email(company, reason)
 
         return Response({"detail": "Company rejected."})
+    
+class AssignStaffView(APIView):
+    """POST { mode, primary_staff_ids? , per_product? }
+    Saves Step C's staff assignment for a company. History is kept: any
+    previously-current rows for this company are marked is_current=False
+    rather than deleted, then fresh rows are inserted — one row per staff
+    per target, so multiple staff can share the same product/company."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, company_id):
+        company = Company.objects.filter(id=company_id).first()
+        if not company:
+            return Response({"detail": "Not found."}, status=404)
+
+        serializer = StaffAssignmentSaveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if data["mode"] == "primary":
+            staff_ids = list(dict.fromkeys(data["primary_staff_ids"]))
+        else:
+            staff_ids = list(dict.fromkeys(
+                sid for ids in data["per_product"].values() for sid in ids
+            ))
+
+        valid_staff = set(
+            User.objects.filter(id__in=staff_ids, role=User.Role.STAFF).values_list("id", flat=True)
+        )
+        if set(staff_ids) - valid_staff:
+            return Response({"detail": "One or more selected staff members are invalid."}, status=400)
+
+        with transaction.atomic():
+            company.staff_assignments.filter(is_current=True).update(is_current=False)
+
+            if data["mode"] == "primary":
+                for staff_id in dict.fromkeys(data["primary_staff_ids"]):
+                    StaffAssignment.objects.create(
+                        company=company,
+                        staff_id=staff_id,
+                        product_name="",
+                        assigned_by=request.user,
+                    )
+            else:
+                for product_name, ids in data["per_product"].items():
+                    for staff_id in dict.fromkeys(ids):
+                        StaffAssignment.objects.create(
+                            company=company,
+                            staff_id=staff_id,
+                            product_name=product_name,
+                            assigned_by=request.user,
+                        )
+
+        return Response(CompanyDetailSerializer(company).data)
+    
+class VerifyProductsView(APIView):
+    """POST { product_verification: {name: status}, verification_note }
+    Saves Step B's per-product verification and internal note against the
+    Company. Doesn't require status=PENDING, so admins can revisit/update
+    this even after later steps."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request, company_id):
+        company = Company.objects.filter(id=company_id).first()
+        if not company:
+            return Response({"detail": "Not found."}, status=404)
+
+        serializer = ProductVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if "product_verification" in data:
+            company.product_verification = data["product_verification"]
+        if "verification_note" in data:
+            company.verification_note = data["verification_note"]
+        company.save()
+
+        return Response(CompanyDetailSerializer(company).data)
     
 # ---------------------------------------------------------------------------
 # Staff Management
@@ -323,6 +426,30 @@ class StaffDetailView(APIView):
         serializer.save()
         return Response(StaffListSerializer(user).data)
 
+    def delete(self, request, staff_id):
+        user = User.objects.filter(id=staff_id, role=User.Role.STAFF).first()
+        if not user:
+            return Response({"detail": "Staff member not found."}, status=404)
+
+        has_active_assignments = StaffAssignment.objects.filter(
+            staff_id=staff_id,
+            is_current=True,
+            company__status=Company.Status.APPROVED,
+        ).exists()
+
+        if has_active_assignments:
+            return Response(
+                {
+                    "detail": "This staff member is currently assigned to one or more "
+                              "customers. Reassign those customers to someone else before "
+                              "deleting this account."
+                },
+                status=400,
+            )
+
+        user.delete()
+        return Response(status=204)
+
 
 class StaffToggleStatusView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
@@ -334,6 +461,24 @@ class StaffToggleStatusView(APIView):
         user.is_active = not user.is_active
         user.save()
         return Response(StaffListSerializer(user).data)
+    
+class StaffAssignedCustomersView(APIView):
+    """GET — companies currently assigned to this staff member (primary or
+    per-product), used by the Staff Management detail slide-over."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request, staff_id):
+        user = User.objects.filter(id=staff_id, role=User.Role.STAFF).first()
+        if not user:
+            return Response({"detail": "Staff member not found."}, status=404)
+
+        assignments = (
+            StaffAssignment.objects
+            .filter(staff_id=staff_id, is_current=True, company__status=Company.Status.APPROVED)
+            .select_related("company")
+            .order_by("company__company_name")
+        )
+        return Response(StaffAssignedCustomerSerializer(assignments, many=True).data)
 
 
 class StaffRoleListCreateView(APIView):

@@ -20,11 +20,15 @@ urlpatterns = [
     path("onboarding/<int:company_id>/", views.CompanyDetailView.as_view(), name="onboarding-detail"),
     path("onboarding/<int:company_id>/approve/", views.ApproveCompanyView.as_view(), name="onboarding-approve"),
     path("onboarding/<int:company_id>/reject/", views.RejectCompanyView.as_view(), name="onboarding-reject"),
+    path("onboarding/<int:company_id>/revoke/", views.RevokeCompanyApprovalView.as_view(), name="onboarding-revoke"),
+    path("onboarding/<int:company_id>/verify-products/", views.VerifyProductsView.as_view(), name="onboarding-verify-products"),
+    path("onboarding/<int:company_id>/assign-staff/", views.AssignStaffView.as_view(), name="onboarding-assign-staff"),
 
     # Staff Management
     path("staff/", views.StaffListCreateView.as_view(), name="staff-list-create"),
     path("staff/<int:staff_id>/", views.StaffDetailView.as_view(), name="staff-detail"),
     path("staff/<int:staff_id>/toggle-status/", views.StaffToggleStatusView.as_view(), name="staff-toggle-status"),
+    path("staff/<int:staff_id>/assigned-customers/", views.StaffAssignedCustomersView.as_view(), name="staff-assigned-customers"),
     path("staff-roles/", views.StaffRoleListCreateView.as_view(), name="staff-roles-list-create"),
     path("staff-roles/<int:role_id>/", views.StaffRoleDeleteView.as_view(), name="staff-roles-delete"),
 

@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Company, Product
-from .models import StaffRole  
+from .models import StaffRole
 
 
 User = get_user_model()
@@ -214,11 +214,10 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
 class CompanyRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
+
 # ---------------------------------------------------------------------------
 # Staff Management
 # ---------------------------------------------------------------------------
-
-
 
 class StaffRoleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -318,3 +317,132 @@ class StaffUpdateSerializer(serializers.Serializer):
             instance.designation = StaffRole.objects.get(name=validated_data["role"])
         instance.save()
         return instance
+
+
+# ---------------------------------------------------------------------------
+# Customer Management (Admin only)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Customer Management (Admin only)
+# ---------------------------------------------------------------------------
+
+def _customer_status(user):
+    """Single source of truth for the three-state status shown in the UI."""
+    if not user.is_active:
+        return "Blocked"
+    if not user.is_approved:
+        return "Pending Approval"
+    return "Active"
+
+
+def _customer_email(user):
+    """The account's own email is often blank — onboarding stores the
+    contact email on Company.email instead. Fall back to that so the UI
+    always shows the email the customer actually entered."""
+    if user.email:
+        return user.email
+    company = getattr(user, "company", None)
+    if company and company.email:
+        return company.email
+    return ""
+
+
+class CustomerCompanySerializer(serializers.ModelSerializer):
+    """Full company snapshot — every field captured during onboarding —
+    shown on the customer View modal."""
+    products = ProductSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Company
+        fields = [
+            "id", "company_code", "company_name", "company_type",
+            "gst_number", "pan_number", "website", "industry_type",
+            "annual_turnover", "employee_count",
+            "address_line1", "address_line2", "city", "state", "country", "pincode",
+            "contact_name", "designation", "email", "mobile_number", "phone_number",
+            "alternate_email",
+            "amc_status", "amc_start_date", "amc_end_date",
+            "preferred_channel", "preferred_time", "remarks",
+            "products_in_use", "contract_ref_number", "products",
+            "status", "submitted_at", "reviewed_at",
+        ]
+
+
+class CustomerListSerializer(serializers.ModelSerializer):
+    """Row shape for the customer table."""
+    name = serializers.CharField(source="full_name")
+    phone = serializers.CharField(source="phone_number")
+    email = serializers.SerializerMethodField()
+    company = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "name", "email", "phone", "company", "status", "date_joined"]
+
+    def get_email(self, obj):
+        return _customer_email(obj)
+
+    def get_company(self, obj):
+        company = getattr(obj, "company", None)
+        return company.company_name if company else "—"
+
+    def get_status(self, obj):
+        return _customer_status(obj)
+
+
+class CustomerDetailSerializer(serializers.ModelSerializer):
+    """Full shape for the View modal — includes every onboarding field via
+    the nested company object."""
+    name = serializers.CharField(source="full_name")
+    phone = serializers.CharField(source="phone_number")
+    email = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    company = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "name", "email", "phone", "company", "status",
+            "is_active", "is_approved", "date_joined",
+        ]
+
+    def get_email(self, obj):
+        return _customer_email(obj)
+
+    def get_company(self, obj):
+        company = getattr(obj, "company", None)
+        return CustomerCompanySerializer(company).data if company else None
+
+    def get_status(self, obj):
+        return _customer_status(obj)
+
+
+class CustomerUpdateSerializer(serializers.ModelSerializer):
+    """Used for PATCH — the Edit action. Only identity fields are editable
+    here; company details belong to the onboarding flow, not this screen."""
+    class Meta:
+        model = User
+        fields = ["full_name", "email", "phone_number"]
+        extra_kwargs = {
+            "full_name": {"required": False},
+            "email": {"required": False},
+            "phone_number": {"required": False},
+        }
+
+    def validate_full_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Name is required.")
+        return value
+
+    def validate_phone_number(self, value):
+        if not value.isdigit() or len(value) != 10:
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        qs = User.objects.filter(phone_number=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Another account already uses this phone number.")
+        return value

@@ -1,5 +1,6 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
+from .views import CustomerListView, CustomerDetailView, CustomerDeactivateView
 
 from . import views
 
@@ -26,4 +27,9 @@ urlpatterns = [
     path("staff/<int:staff_id>/toggle-status/", views.StaffToggleStatusView.as_view(), name="staff-toggle-status"),
     path("staff-roles/", views.StaffRoleListCreateView.as_view(), name="staff-roles-list-create"),
     path("staff-roles/<int:role_id>/", views.StaffRoleDeleteView.as_view(), name="staff-roles-delete"),
+
+    #Customer Management
+    path("customers/", CustomerListView.as_view(), name="customer-list"),
+    path("customers/<int:pk>/", CustomerDetailView.as_view(), name="customer-detail"),
+    path("customers/<int:pk>/deactivate/", CustomerDeactivateView.as_view(), name="customer-deactivate"),
 ]

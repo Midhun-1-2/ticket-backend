@@ -148,3 +148,26 @@ class TicketAssignment(models.Model):
 
     def __str__(self):
         return f"{self.ticket_id} -> {self.staff} ({self.status})"
+    
+class ProductMaster(models.Model):
+    """Admin-managed product catalog — distinct from authentication.Product,
+    which records what a specific company has purchased/activated. This is
+    the master list of products the ticketing system knows about (feeds the
+    'Product' dropdown on Raise Ticket, eventually replacing the hardcoded
+    PRODUCT_CHOICES on Ticket)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=150, unique=True)
+    version = models.CharField(max_length=30, blank=True)
+    activation_date = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name = "Product"
+        verbose_name_plural = "Products"
+
+    def __str__(self):
+        return f"{self.name} ({self.version})" if self.version else self.name

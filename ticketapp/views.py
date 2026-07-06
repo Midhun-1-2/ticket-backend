@@ -235,3 +235,4 @@ class DeclineTicketAssignmentView(APIView):
         assignment.responded_at = timezone.now()
         assignment.save(update_fields=['status', 'responded_at'])
         return Response(TicketAssignmentSerializer(assignment).data)
+    

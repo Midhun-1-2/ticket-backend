@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from .models import Company, Product
 from .models import StaffRole
-
+from ticketapp.models import Ticket
 
 User = get_user_model()
 
@@ -404,10 +404,6 @@ class StaffUpdateSerializer(serializers.Serializer):
 # Customer Management (Admin only)
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Customer Management (Admin only)
-# ---------------------------------------------------------------------------
-
 def _customer_status(user):
     """Single source of truth for the three-state status shown in the UI."""
     if not user.is_active:
@@ -472,21 +468,32 @@ class CustomerListSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return _customer_status(obj)
 
+class CustomerTicketSerializer(serializers.ModelSerializer):
+    """Minimal ticket shape for the customer's ticket history, shown in
+    the Customers → View modal."""
+    category = serializers.CharField(source='category.name', default='—')
 
+    class Meta:
+        model = Ticket
+        fields = ['id', 'subject', 'category', 'product', 'priority', 'status', 'created_at']
+        
 class CustomerDetailSerializer(serializers.ModelSerializer):
     """Full shape for the View modal — includes every onboarding field via
-    the nested company object."""
+    the nested company object, plus the customer's ticket history."""
     name = serializers.CharField(source="full_name")
     phone = serializers.CharField(source="phone_number")
     email = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     company = serializers.SerializerMethodField()
+    tickets = serializers.SerializerMethodField()
+    ticket_stats = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "name", "email", "phone", "company", "status",
             "is_active", "is_approved", "date_joined",
+            "tickets", "ticket_stats",
         ]
 
     def get_email(self, obj):
@@ -498,6 +505,19 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
 
     def get_status(self, obj):
         return _customer_status(obj)
+
+    def get_tickets(self, obj):
+        tickets = (
+            Ticket.objects.filter(raised_by=obj)
+            .select_related("category")
+            .order_by("-created_at")
+        )
+        return CustomerTicketSerializer(tickets, many=True).data
+
+    def get_ticket_stats(self, obj):
+        tickets = Ticket.objects.filter(raised_by=obj)
+        by_status = {choice: tickets.filter(status=choice).count() for choice, _ in Ticket.STATUS_CHOICES}
+        return {"total": tickets.count(), "by_status": by_status}
 
 
 class CustomerUpdateSerializer(serializers.ModelSerializer):

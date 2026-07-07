@@ -1,8 +1,6 @@
 from rest_framework import serializers
-from .models import Category, Ticket, TicketAttachment, TicketAssignment
+from .models import Category, Ticket, TicketAttachment, TicketAssignment, ProductMaster
 
-from .models import Category, Ticket, TicketAttachment
-from .models import Category, Ticket, TicketAttachment, ProductMaster
 
 class CategorySerializer(serializers.ModelSerializer):
     # Tells the frontend whether this category is referenced by any ticket,
@@ -68,9 +66,14 @@ class TicketSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'subject', 'category', 'priority', 'description', 'product',
             'status', 'raised_by', 'assigned_staff', 'attachments',
+            'escalated', 'escalated_at', 'escalation_note',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'status', 'raised_by', 'assigned_staff', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'status', 'raised_by', 'assigned_staff',
+            'escalated', 'escalated_at', 'escalation_note',
+            'created_at', 'updated_at',
+        ]
 
     def validate_subject(self, value):
         value = value.strip()
@@ -79,8 +82,29 @@ class TicketSerializer(serializers.ModelSerializer):
         return value
 
 
+class TicketStatusUpdateSerializer(serializers.Serializer):
+    """POST/PATCH body for TicketStatusUpdateView — just the new status.
+    'Open' is deliberately excluded: that's the system's initial state
+    before anyone accepts it, not something a staff member should be able
+    to set once they own the ticket."""
+    STAFF_SETTABLE_STATUSES = ['In Progress', 'On Hold', 'Resolved', 'Closed']
+
+    status = serializers.ChoiceField(choices=STAFF_SETTABLE_STATUSES)
+
+
+class TransferTicketSerializer(serializers.Serializer):
+    """POST body for TransferTicketView — who to hand the ticket to."""
+    staff_id = serializers.IntegerField()
+
+
+class EscalateTicketSerializer(serializers.Serializer):
+    """POST body for EscalateTicketView — an optional note for admin
+    explaining why this needs attention."""
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+
 # ---------------------------------------------------------------------------
-# Ticket Assignment — offer / accept / decline
+# Ticket Assignment — offer / accept / decline / transfer
 # ---------------------------------------------------------------------------
 
 class TicketAssignmentTicketSerializer(serializers.ModelSerializer):
@@ -90,12 +114,13 @@ class TicketAssignmentTicketSerializer(serializers.ModelSerializer):
     category = serializers.CharField(source='category.name', read_only=True)
     customer_name = serializers.CharField(source='raised_by.full_name', read_only=True, default='')
     company_name = serializers.SerializerMethodField()
+    assigned_staff = RaisedBySerializer(read_only=True)
 
     class Meta:
         model = Ticket
         fields = [
             'id', 'subject', 'category', 'priority', 'product', 'status',
-            'customer_name', 'company_name', 'created_at',
+            'customer_name', 'company_name', 'escalated', 'assigned_staff', 'created_at',
         ]
 
     def get_company_name(self, obj):
@@ -107,19 +132,23 @@ class StaffMiniSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     full_name = serializers.CharField()
     phone_number = serializers.CharField()
+    role = serializers.CharField()
 
 
 class TicketAssignmentSerializer(serializers.ModelSerializer):
     ticket = TicketAssignmentTicketSerializer(read_only=True)
     staff = StaffMiniSerializer(read_only=True)
+    transferred_to = StaffMiniSerializer(read_only=True)
 
     class Meta:
         model = TicketAssignment
-        fields = ['id', 'ticket', 'staff', 'status', 'offered_at', 'responded_at']
+        fields = ['id', 'ticket', 'staff', 'status', 'offered_at', 'responded_at', 'transferred_to']
         read_only_fields = fields
-    
 
 
+# ---------------------------------------------------------------------------
+# Product Master
+# ---------------------------------------------------------------------------
 
 class ProductMasterSerializer(serializers.ModelSerializer):
     class Meta:
@@ -137,6 +166,7 @@ class ProductMasterSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("A product with this name already exists.")
         return value
+
 
 class PublicProductSerializer(serializers.ModelSerializer):
     """Minimal, public-safe shape — used by customer registration

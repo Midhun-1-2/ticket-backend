@@ -81,7 +81,8 @@ class Ticket(models.Model):
     )
 
     # Set only once a staff member accepts an offer via TicketAssignment
-    # (see AcceptTicketAssignmentView). Null means no one has claimed it yet.
+    # (see AcceptTicketAssignmentView), or via a transfer
+    # (see TransferTicketView). Null means no one has claimed it yet.
     assigned_staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -89,6 +90,13 @@ class Ticket(models.Model):
         blank=True,
         related_name='tickets_assigned_to',
     )
+
+    # Escalation — flagged by the assigned staff member for admin
+    # attention. Doesn't reassign the ticket; it stays with the staff
+    # member, this just surfaces it. See EscalateTicketView.
+    escalated = models.BooleanField(default=False)
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    escalation_note = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -111,7 +119,7 @@ class TicketAttachment(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# Ticket Assignment — offer / accept / decline
+# Ticket Assignment — offer / accept / decline / transfer
 # ---------------------------------------------------------------------------
 
 class TicketAssignment(models.Model):
@@ -123,12 +131,19 @@ class TicketAssignment(models.Model):
     ticket flips to 'unavailable' in the same transaction (see
     AcceptTicketAssignmentView), so there's no window where two staff can
     both successfully claim the same ticket.
+
+    A 'transferred' row is created when a staff member hands the ticket to
+    someone else directly (see TransferTicketView) — the outgoing staff's
+    row flips to 'transferred', and a new 'accepted' row is created for the
+    incoming staff member (no race, since it's a direct handoff rather than
+    a fresh multi-staff offer).
     """
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('accepted', 'Accepted'),
         ('declined', 'Declined'),
         ('unavailable', 'Unavailable'),  # lost the race to another staff member
+        ('transferred', 'Transferred'),  # handed off to another staff member
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -140,6 +155,17 @@ class TicketAssignment(models.Model):
     offered_at = models.DateTimeField(auto_now_add=True)
     responded_at = models.DateTimeField(null=True, blank=True)
 
+    # Who this ticket was transferred TO, only set on the outgoing staff
+    # member's row when status='transferred'. Lets the "Past offers" list
+    # show "Transferred to <name>" instead of just a bare status label.
+    transferred_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ticket_assignments_received_via_transfer',
+    )
+
     class Meta:
         ordering = ['-offered_at']
         constraints = [
@@ -148,8 +174,7 @@ class TicketAssignment(models.Model):
 
     def __str__(self):
         return f"{self.ticket_id} -> {self.staff} ({self.status})"
-    
-    
+
 
 class ProductMaster(models.Model):
     """Admin-managed product catalog — distinct from authentication.Product,

@@ -472,10 +472,18 @@ class CustomerTicketSerializer(serializers.ModelSerializer):
     """Minimal ticket shape for the customer's ticket history, shown in
     the Customers → View modal."""
     category = serializers.CharField(source='category.name', default='—')
+    assigned_staff_name = serializers.SerializerMethodField()
+    remarks = serializers.CharField(source='escalation_note', default='')
 
     class Meta:
         model = Ticket
-        fields = ['id', 'subject', 'category', 'product', 'priority', 'status', 'created_at']
+        fields = [
+            'id', 'subject', 'category', 'product', 'priority', 'status',
+            'created_at', 'assigned_staff_name', 'remarks',
+        ]
+
+    def get_assigned_staff_name(self, obj):
+        return obj.assigned_staff.full_name if obj.assigned_staff else None
         
 class CustomerDetailSerializer(serializers.ModelSerializer):
     """Full shape for the View modal — includes every onboarding field via
@@ -509,7 +517,7 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
     def get_tickets(self, obj):
         tickets = (
             Ticket.objects.filter(raised_by=obj)
-            .select_related("category")
+            .select_related("category","assigned_staff")
             .order_by("-created_at")
         )
         return CustomerTicketSerializer(tickets, many=True).data

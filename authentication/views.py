@@ -11,6 +11,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .models import Company, Mpin, StaffAssignment, StaffRole
 from .permissions import IsAdminOrStaff
+from ticketapp.models import Ticket
 from .serializers import (
     CompanyDetailSerializer,
     CompanyDraftSerializer,
@@ -545,6 +546,10 @@ class StaffRoleDeleteView(APIView):
         return Response(status=204)
 
 
+# ---------------------------------------------------------------------------
+# Customer Management (Admin/Staff)
+# ---------------------------------------------------------------------------
+
 class CustomerListView(generics.ListAPIView):
     """
     GET /customers/?search=...&status=active|pending|blocked
@@ -577,10 +582,13 @@ class CustomerListView(generics.ListAPIView):
         return qs.order_by("-date_joined")
 
 
-class CustomerDetailView(generics.RetrieveUpdateAPIView):
+class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
-    GET   /customers/<id>/   — full detail for the View panel
-    PATCH /customers/<id>/   — Edit action (name/email/phone only)
+    GET    /customers/<id>/   — full detail for the View panel
+    PATCH  /customers/<id>/   — Edit action (name/email/phone only)
+    DELETE /customers/<id>/   — Delete action. Blocked with 409 if the
+                                 customer has raised even a single ticket;
+                                 use Deactivate instead in that case.
     """
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
     queryset = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
@@ -597,6 +605,22 @@ class CustomerDetailView(generics.RetrieveUpdateAPIView):
         serializer.save()
         # Respond with the full detail shape so the frontend can refresh the row in-place.
         return Response(CustomerDetailSerializer(instance).data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        if Ticket.objects.filter(raised_by=instance).exists():
+            return Response(
+                {
+                    "detail": "This customer has raised one or more tickets and cannot be "
+                              "deleted. Deactivate the account instead if you need to "
+                              "restrict access."
+                },
+                status=http_status.HTTP_409_CONFLICT,
+            )
+
+        instance.delete()
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
 class CustomerDeactivateView(APIView):

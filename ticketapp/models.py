@@ -47,17 +47,6 @@ class Ticket(models.Model):
         ('Closed', 'Closed'),
     ]
 
-    # Hardcoded to match the frontend's PRODUCTS list for now — swap for a
-    # FK to a real Product/Module model if that ever becomes its own thing.
-    PRODUCT_CHOICES = [
-        ('Not Applicable', 'Not Applicable'),
-        ('Ticket Desk Pro', 'Ticket Desk Pro'),
-        ('API Gateway', 'API Gateway'),
-        ('SSO Add-on', 'SSO Add-on'),
-        ('Analytics Suite', 'Analytics Suite'),
-        ('Mobile App', 'Mobile App'),
-    ]
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     subject = models.CharField(max_length=200)
     category = models.ForeignKey(
@@ -65,9 +54,16 @@ class Ticket(models.Model):
     )
     priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='Medium')
     description = models.TextField()
-    product = models.CharField(
-        max_length=30, choices=PRODUCT_CHOICES, default='Not Applicable', blank=True
-    )
+
+    # No longer a fixed choices list — validated dynamically against
+    # ProductMaster in TicketSerializer.validate_product instead, so new
+    # products added via Product Master work immediately without a
+    # migration. 'Not Applicable' remains a valid sentinel value even
+    # though it isn't a real ProductMaster row (see validate_product).
+    # max_length matches ProductMaster.name's length so nothing here gets
+    # silently truncated.
+    product = models.CharField(max_length=150, blank=True, default='Not Applicable')
+
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='Open')
 
     # Who raised it — set automatically from the authenticated request,
@@ -97,6 +93,12 @@ class Ticket(models.Model):
     escalated = models.BooleanField(default=False)
     escalated_at = models.DateTimeField(null=True, blank=True)
     escalation_note = models.TextField(blank=True)
+
+    # Set the first time status flips to 'Closed' via TicketStatusUpdateView
+    # / TicketDetailView.perform_update. Cleared if the ticket is ever
+    # reopened (moved to any other status), so this always reflects the
+    # *current* closure, not a historical one.
+    closed_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -180,11 +182,20 @@ class ProductMaster(models.Model):
     """Admin-managed product catalog — distinct from authentication.Product,
     which records what a specific company has purchased/activated. This is
     the master list of products the ticketing system knows about (feeds the
-    'Product' dropdown on Raise Ticket, eventually replacing the hardcoded
-    PRODUCT_CHOICES on Ticket)."""
+    'Product' dropdown on Raise Ticket and Onboarding). Ticket.product is
+    validated against this table dynamically (see TicketSerializer) rather
+    than a fixed choices list.
+
+    `name` is no longer globally unique on its own — a single product can
+    have multiple versions, each stored as its own row sharing the same
+    name. (name, version) together must be unique instead, so the same
+    product/version pair can't be entered twice, but "Ticket Desk Pro"
+    v1.0 and v2.0 can coexist as separate rows. See ProductMasterPage.jsx's
+    "Add New Version" action, which POSTs a new row rather than PATCHing
+    an existing one."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=150, unique=True)
+    name = models.CharField(max_length=150)
     version = models.CharField(max_length=30, blank=True)
     activation_date = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
@@ -192,9 +203,12 @@ class ProductMaster(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['name', 'version']
         verbose_name = "Product"
         verbose_name_plural = "Products"
+        constraints = [
+            models.UniqueConstraint(fields=['name', 'version'], name='unique_product_name_version')
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.version})" if self.version else self.name

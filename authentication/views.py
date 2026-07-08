@@ -11,10 +11,10 @@ from rest_framework_simplejwt.exceptions import TokenError
 import random
 from datetime import timedelta
 from django.conf import settings
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
 from .models import Company, EmailOTP, Mpin, Product, StaffAssignment, StaffRole, StaffDepartment
 from .permissions import IsAdminOrStaff
-from ticketapp.models import Ticket
+from .email_templates import build_otp_email_html, build_otp_email_text
 from .serializers import (
     CompanyDetailSerializer,
     CompanyDraftSerializer,
@@ -65,6 +65,23 @@ def issue_tokens(user):
         "phone_number": user.phone_number,
         "full_name": user.full_name,
     }
+
+
+def send_otp_email(user, otp, title, intro_text):
+    """Shared by RequestMpinChangeOtpView and RequestForgotMpinOtpView —
+    sends the branded HTML OTP email (see authentication/email_templates.py)
+    with a plain-text fallback for clients that don't render HTML."""
+    text_body = build_otp_email_text(user.full_name or user.phone_number, otp, title, intro_text)
+    html_body = build_otp_email_html(user.full_name or user.phone_number, otp, title, intro_text)
+
+    email = EmailMultiAlternatives(
+        subject=title,
+        body=text_body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[user.email],
+    )
+    email.attach_alternative(html_body, "text/html")
+    email.send(fail_silently=False)
 
 
 class LoginView(APIView):
@@ -588,9 +605,6 @@ class StaffDepartmentDeleteView(APIView):
         department.delete()
         return Response(status=204)
 
-# ---------------------------------------------------------------------------
-# Customer Management (Admin/Staff)
-# ---------------------------------------------------------------------------
 
 class CustomerListView(generics.ListAPIView):
     """
@@ -624,13 +638,10 @@ class CustomerListView(generics.ListAPIView):
         return qs.order_by("-date_joined")
 
 
-class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
+class CustomerDetailView(generics.RetrieveUpdateAPIView):
     """
-    GET    /customers/<id>/   — full detail for the View panel
-    PATCH  /customers/<id>/   — Edit action (name/email/phone only)
-    DELETE /customers/<id>/   — Delete action. Blocked with 409 if the
-                                 customer has raised even a single ticket;
-                                 use Deactivate instead in that case.
+    GET   /customers/<id>/   — full detail for the View panel
+    PATCH /customers/<id>/   — Edit action (name/email/phone only)
     """
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
     queryset = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
@@ -646,22 +657,6 @@ class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(CustomerDetailSerializer(instance).data)
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-
-        if Ticket.objects.filter(raised_by=instance).exists():
-            return Response(
-                {
-                    "detail": "This customer has raised one or more tickets and cannot be "
-                              "deleted. Deactivate the account instead if you need to "
-                              "restrict access."
-                },
-                status=http_status.HTTP_409_CONFLICT,
-            )
-
-        instance.delete()
-        return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
 class CustomerDeactivateView(APIView):
@@ -817,11 +812,11 @@ class ProfileView(APIView):
 class RequestMpinChangeOtpView(APIView):
     """
     POST /mpin/change/request-otp/
-    Generates a 4-digit OTP, emails it to the logged-in user's registered
-    email, and stores a hashed copy (10 min expiry). Any previous unused
-    OTPs for this user+purpose are invalidated first — same "only the
-    latest one is live" pattern as flipping stale pending offers in
-    AcceptTicketAssignmentView.
+    Generates a 4-digit OTP, emails it (branded HTML, see send_otp_email
+    above) to the logged-in user's registered email, and stores a hashed
+    copy (10 min expiry). Any previous unused OTPs for this user+purpose
+    are invalidated first — same "only the latest one is live" pattern as
+    flipping stale pending offers in AcceptTicketAssignmentView.
     """
     permission_classes = [IsAuthenticated]
 
@@ -846,17 +841,10 @@ class RequestMpinChangeOtpView(APIView):
         otp_row.set_otp(otp)
         otp_row.save()
 
-        send_mail(
-            subject="Your Ticket Desk M-PIN change OTP",
-            message=(
-                f"Hi {user.full_name or user.phone_number},\n\n"
-                f"Your OTP to change your M-PIN is: {otp}\n"
-                f"This code expires in 10 minutes. If you didn't request this, "
-                f"you can safely ignore this email.\n\n— Ticket Desk"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+        send_otp_email(
+            user, otp,
+            title="Change your M-PIN",
+            intro_text="Use the code below to confirm you'd like to change your M-PIN.",
         )
 
         return Response({"detail": "OTP sent to your registered email."})
@@ -976,17 +964,10 @@ class RequestForgotMpinOtpView(APIView):
         otp_row.set_otp(otp)
         otp_row.save()
 
-        send_mail(
-            subject="Reset your Ticket Desk M-PIN",
-            message=(
-                f"Hi {user.full_name or user.phone_number},\n\n"
-                f"Your OTP to reset your M-PIN is: {otp}\n"
-                f"This code expires in 10 minutes. If you didn't request this, "
-                f"you can safely ignore this email.\n\n— Ticket Desk"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
+        send_otp_email(
+            user, otp,
+            title="Reset your M-PIN",
+            intro_text="Use the code below to verify it's you, then you'll be able to set a new M-PIN.",
         )
 
         # Masked so the login screen can show "OTP sent to j***n@gmail.com"

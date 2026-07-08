@@ -5,6 +5,7 @@ from .views import (
     TicketListCreateView,
     TicketDetailView,
     TicketStatusUpdateView,
+    RevokeTicketView,
     TransferTicketView,
     EscalateTicketView,
     TicketEligibleStaffView,
@@ -16,6 +17,7 @@ from .views import (
     ProductMasterListCreateView,
     ProductMasterDetailView,
     PublicProductListView,
+    TicketAssignmentHistoryView,
 )
 
 urlpatterns = [
@@ -25,6 +27,7 @@ urlpatterns = [
     path('tickets/', TicketListCreateView.as_view(), name='ticket-list-create'),
     path('tickets/<uuid:pk>/', TicketDetailView.as_view(), name='ticket-detail'),
     path('tickets/<uuid:pk>/status/', TicketStatusUpdateView.as_view(), name='ticket-status-update'),
+    path('tickets/<uuid:pk>/revoke/', RevokeTicketView.as_view(), name='ticket-revoke'),
     path('tickets/<uuid:pk>/transfer/', TransferTicketView.as_view(), name='ticket-transfer'),
     path('tickets/<uuid:pk>/escalate/', EscalateTicketView.as_view(), name='ticket-escalate'),
     path('tickets/<uuid:pk>/eligible-staff/', TicketEligibleStaffView.as_view(), name='ticket-eligible-staff'),
@@ -39,4 +42,6 @@ urlpatterns = [
     path('products/<uuid:pk>/', ProductMasterDetailView.as_view(), name='product-detail'),
 
     path('public-products/', PublicProductListView.as_view(), name='public-product-list'),
+
+    path('tickets/<uuid:pk>/assignment-history/', TicketAssignmentHistoryView.as_view(), name='ticket-assignment-history'),
 ]

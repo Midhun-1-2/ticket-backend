@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Company, Product
-from .models import StaffRole
+from .models import StaffRole, StaffDepartment
 from ticketapp.models import Ticket
 
 User = get_user_model()
@@ -195,7 +195,7 @@ class CompanyListSerializer(serializers.ModelSerializer):
 
 class CompanyDetailSerializer(serializers.ModelSerializer):
     products = ProductSerializer(many=True, read_only=True)
-    staff_assignment = serializers.SerializerMethodField()  # <-- added
+    staff_assignment = serializers.SerializerMethodField()
 
     class Meta:
         model = Company
@@ -210,7 +210,7 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
             "preferred_time", "remarks", "products_in_use", "contract_ref_number",
             "products", "submitted_at", "reviewed_at",
             "product_verification", "verification_note",
-            "staff_assignment",  # <-- added
+            "staff_assignment",
         ]
 
     def get_staff_assignment(self, obj):
@@ -235,8 +235,10 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
             )
         return {"mode": "per-product", "per_product": per_product}
 
+
 class CompanyRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
+
 
 class ProductVerificationSerializer(serializers.Serializer):
     """Accepts { product_verification: {name: status}, verification_note }"""
@@ -246,6 +248,7 @@ class ProductVerificationSerializer(serializers.Serializer):
         child=serializers.ChoiceField(choices=VALID_STATUSES), required=False
     )
     verification_note = serializers.CharField(required=False, allow_blank=True)
+
 
 class StaffAssignmentSaveSerializer(serializers.Serializer):
     """Accepts either:
@@ -286,34 +289,47 @@ class StaffRoleSerializer(serializers.ModelSerializer):
         return value
 
 
+class StaffDepartmentSerializer(serializers.ModelSerializer):
+    """Mirrors StaffRoleSerializer exactly — same list/create shape, just
+    for the department lookup table instead of roles."""
+    class Meta:
+        model = StaffDepartment
+        fields = ["id", "name"]
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Department name cannot be blank.")
+        return value
+
+
 class StaffListSerializer(serializers.ModelSerializer):
     """Read shape — matches the frontend's expected keys directly."""
     name = serializers.CharField(source="full_name")
     phone = serializers.CharField(source="phone_number")
     role = serializers.SerializerMethodField()
-    ticketsAssigned = serializers.IntegerField(source="tickets_assigned")
+    ticketsAssigned = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
-    assignedCustomers = serializers.SerializerMethodField()  # <-- added
+    assignedCustomers = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "name", "email", "phone", "department", "role",
-            "ticketsAssigned", "status", "assignedCustomers",  # <-- added
+            "ticketsAssigned", "status", "assignedCustomers",
         ]
 
     def get_role(self, obj):
         return obj.designation.name if obj.designation else ""
 
+    def get_ticketsAssigned(self, obj):
+        return Ticket.objects.filter(assigned_staff=obj).count()
+
     def get_status(self, obj):
         return "active" if obj.is_active else "inactive"
 
     def get_assignedCustomers(self, obj):
-        # Counts distinct APPROVED companies currently assigned to this
-        # staff member — either as primary (product_name="") or for any
-        # specific product. distinct() avoids double-counting a company
-        # that has this staff assigned across multiple products.
-        from .models import Company  # local import avoids circular import issues
+        from .models import Company
         return (
             obj.customer_assignments
             .filter(is_current=True, company__status=Company.Status.APPROVED)
@@ -321,7 +337,8 @@ class StaffListSerializer(serializers.ModelSerializer):
             .distinct()
             .count()
         )
-    
+
+
 class StaffAssignedCustomerSerializer(serializers.Serializer):
     """Used by the Staff Management detail slide-over — lists the
     companies currently assigned to a given staff member."""
@@ -329,6 +346,26 @@ class StaffAssignedCustomerSerializer(serializers.Serializer):
     company_name = serializers.CharField(source="company.company_name")
     product_name = serializers.CharField()  # "" means primary / all products
     assigned_at = serializers.DateTimeField()
+
+
+class StaffAssignedTicketSerializer(serializers.ModelSerializer):
+    """Used by the Staff Management detail slide-over — lists the tickets
+    currently assigned to a given staff member (Ticket.assigned_staff).
+    Sibling of StaffAssignedCustomerSerializer above, just sourced from
+    Ticket instead of StaffAssignment. Includes customer_name since this
+    view isn't scoped to a single customer the way CustomerTicketSerializer
+    (below) is."""
+    category = serializers.CharField(source='category.name', default='—')
+    customer_name = serializers.CharField(
+        source='raised_by.full_name', default='', allow_null=True
+    )
+
+    class Meta:
+        model = Ticket
+        fields = [
+            'id', 'subject', 'category', 'product', 'priority', 'status',
+            'customer_name', 'created_at',
+        ]
 
 
 class StaffCreateSerializer(serializers.Serializer):
@@ -344,6 +381,11 @@ class StaffCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Phone number must be exactly 10 digits.")
         if User.objects.filter(phone_number=value).exists():
             raise serializers.ValidationError("An account with this phone number already exists.")
+        return value
+
+    def validate_department(self, value):
+        if not StaffDepartment.objects.filter(name=value).exists():
+            raise serializers.ValidationError("Unknown department. Add it first.")
         return value
 
     def validate_role(self, value):
@@ -378,6 +420,11 @@ class StaffUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Phone number must be exactly 10 digits.")
         if User.objects.filter(phone_number=value).exclude(id=self.instance.id).exists():
             raise serializers.ValidationError("Another account already uses this phone number.")
+        return value
+
+    def validate_department(self, value):
+        if not StaffDepartment.objects.filter(name=value).exists():
+            raise serializers.ValidationError("Unknown department. Add it first.")
         return value
 
     def validate_role(self, value):
@@ -468,6 +515,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return _customer_status(obj)
 
+
 class CustomerTicketSerializer(serializers.ModelSerializer):
     """Minimal ticket shape for the customer's ticket history, shown in
     the Customers → View modal."""
@@ -476,7 +524,8 @@ class CustomerTicketSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ticket
         fields = ['id', 'subject', 'category', 'product', 'priority', 'status', 'created_at']
-        
+
+
 class CustomerDetailSerializer(serializers.ModelSerializer):
     """Full shape for the View modal — includes every onboarding field via
     the nested company object, plus the customer's ticket history."""
@@ -547,3 +596,104 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("Another account already uses this phone number.")
         return value
+
+
+class CustomerAddProductSerializer(serializers.Serializer):
+    """POST body for CustomerAddProductView — admin picks a Product Master
+    catalog entry (ticketapp.ProductMaster) and it's added to the
+    customer's company as a new Product row. Only product_id is accepted;
+    name/version are copied server-side from the catalog entry so the
+    two stay in sync."""
+    product_id = serializers.UUIDField()
+
+    def validate_product_id(self, value):
+        from ticketapp.models import ProductMaster
+        if not ProductMaster.objects.filter(pk=value, is_active=True).exists():
+            raise serializers.ValidationError("Unknown or inactive product.")
+        return value
+    
+class ProfileSerializer(serializers.ModelSerializer):
+    """Read/update shape for the logged-in user's own profile page.
+    Phone number is intentionally excluded from edits — it's the login
+    identifier (USERNAME_FIELD), so changing it here would need token
+    re-issuance / uniqueness handling mid-session. Keep it read-only for
+    now; can revisit as its own dedicated flow later if needed."""
+    department_name = serializers.CharField(source="department", read_only=True)
+    designation_name = serializers.SerializerMethodField()
+    has_mpin = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "full_name", "email", "phone_number", "role",
+            "department_name", "designation_name", "date_joined",
+            "is_approved", "has_mpin",
+        ]
+        read_only_fields = [
+            "id", "phone_number", "role", "department_name",
+            "designation_name", "date_joined", "is_approved", "has_mpin",
+        ]
+
+    def get_designation_name(self, obj):
+        return obj.designation.name if obj.designation else ""
+
+    def get_has_mpin(self, obj):
+        return hasattr(obj, "mpin")
+
+    def validate_full_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Name is required.")
+        return value
+
+
+class VerifyMpinOtpSerializer(serializers.Serializer):
+    otp = serializers.CharField(min_length=4, max_length=4)
+
+    def validate_otp(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("OTP must be numeric.")
+        return value
+
+
+class ChangeMpinSerializer(serializers.Serializer):
+    new_mpin = serializers.CharField(min_length=4, max_length=6)
+    confirm_mpin = serializers.CharField(min_length=4, max_length=6)
+
+    def validate(self, attrs):
+        if not attrs["new_mpin"].isdigit():
+            raise serializers.ValidationError("M-PIN must be numeric.")
+        if attrs["new_mpin"] != attrs["confirm_mpin"]:
+            raise serializers.ValidationError("M-PINs do not match.")
+        return attrs
+
+
+# ---------------------------------------------------------------------------
+# Forgot M-PIN — unauthenticated flow from the login screen
+# ---------------------------------------------------------------------------
+
+class ForgotMpinRequestOtpSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=10, min_length=10)
+
+
+class ForgotMpinVerifyOtpSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=10, min_length=10)
+    otp = serializers.CharField(min_length=4, max_length=4)
+
+    def validate_otp(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("OTP must be numeric.")
+        return value
+
+
+class ForgotMpinResetSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=10, min_length=10)
+    new_mpin = serializers.CharField(min_length=4, max_length=6)
+    confirm_mpin = serializers.CharField(min_length=4, max_length=6)
+
+    def validate(self, attrs):
+        if not attrs["new_mpin"].isdigit():
+            raise serializers.ValidationError("M-PIN must be numeric.")
+        if attrs["new_mpin"] != attrs["confirm_mpin"]:
+            raise serializers.ValidationError("M-PINs do not match.")
+        return attrs

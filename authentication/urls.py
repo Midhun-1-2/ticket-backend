@@ -1,6 +1,6 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomerListView, CustomerDetailView, CustomerDeactivateView
+from .views import CustomerListView, CustomerDetailView, CustomerDeactivateView, CustomerAddProductView, CustomerRemoveProductView
 
 from . import views
 
@@ -30,13 +30,28 @@ urlpatterns = [
     path("staff/<int:staff_id>/", views.StaffDetailView.as_view(), name="staff-detail"),
     path("staff/<int:staff_id>/toggle-status/", views.StaffToggleStatusView.as_view(), name="staff-toggle-status"),
     path("staff/<int:staff_id>/assigned-customers/", views.StaffAssignedCustomersView.as_view(), name="staff-assigned-customers"),
+    path("staff/<int:staff_id>/assigned-tickets/", views.StaffAssignedTicketsView.as_view(), name="staff-assigned-tickets"),
     path("staff-roles/", views.StaffRoleListCreateView.as_view(), name="staff-roles-list-create"),
     path("staff-roles/<int:role_id>/", views.StaffRoleDeleteView.as_view(), name="staff-roles-delete"),
+    path("staff-departments/", views.StaffDepartmentListCreateView.as_view(), name="staff-departments-list-create"),
+    path("staff-departments/<int:department_id>/", views.StaffDepartmentDeleteView.as_view(), name="staff-departments-delete"),
 
     #Customer Management
     path("customers/", CustomerListView.as_view(), name="customer-list"),
     path("customers/<int:pk>/", CustomerDetailView.as_view(), name="customer-detail"),
     path("customers/<int:pk>/deactivate/", CustomerDeactivateView.as_view(), name="customer-deactivate"),
+    path("customers/<int:pk>/products/", CustomerAddProductView.as_view(), name="customer-add-product"),
+    path("customers/<int:pk>/products/<int:product_id>/", CustomerRemoveProductView.as_view(), name="customer-remove-product"),
 
     path('my-products/', views.MyProductsView.as_view(), name='my-products'),
+
+    path("profile/", views.ProfileView.as_view(), name="profile"),
+    path("mpin/change/request-otp/", views.RequestMpinChangeOtpView.as_view(), name="mpin-change-request-otp"),
+    path("mpin/change/verify-otp/", views.VerifyMpinChangeOtpView.as_view(), name="mpin-change-verify-otp"),
+    path("mpin/change/", views.ChangeMpinView.as_view(), name="mpin-change"),
+
+    # Forgot M-PIN — unauthenticated, used from the login screen
+    path("mpin/forgot/request-otp/", views.RequestForgotMpinOtpView.as_view(), name="mpin-forgot-request-otp"),
+    path("mpin/forgot/verify-otp/", views.VerifyForgotMpinOtpView.as_view(), name="mpin-forgot-verify-otp"),
+    path("mpin/forgot/reset/", views.ResetForgotMpinView.as_view(), name="mpin-forgot-reset"),
 ]

@@ -5,6 +5,8 @@ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseU
 from django.core.validators import RegexValidator
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+from datetime import timedelta
 
 phone_validator = RegexValidator(
     regex=r"^\d{10}$",
@@ -25,6 +27,28 @@ class StaffRole(models.Model):
 
     class Meta:
         db_table = "staff_roles"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+# ---------------------------------------------------------------------------
+# Staff departments (e.g. "Technical", "Account") — same pattern as
+# StaffRole above, just for CustomUser.department. That field stays a
+# plain CharField (not a FK) to avoid migrating existing string values;
+# this table exists purely to back the "Add Department" modal and to let
+# StaffCreateSerializer/StaffUpdateSerializer validate that a department
+# name actually exists before accepting it, the same way validate_role
+# already does against StaffRole.
+# ---------------------------------------------------------------------------
+
+class StaffDepartment(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "staff_departments"
         ordering = ["name"]
 
     def __str__(self):
@@ -90,8 +114,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name="staff_members",
     )
-    # Simple counter for now — swap to a computed value (e.g. Ticket.objects
-    # .filter(assigned_to=user).count()) once a Ticket model exists.
+    # NOTE: this stored counter is no longer read anywhere — StaffListSerializer
+    # now computes ticketsAssigned live from Ticket.objects.filter(assigned_staff=...)
+    # instead (see StaffListSerializer.get_ticketsAssigned in serializers.py),
+    # since a real Ticket model exists now. Left on the model rather than
+    # removed outright to avoid a migration that drops a column something
+    # else might still reference; safe to drop later once confirmed unused.
     tickets_assigned = models.PositiveIntegerField(default=0)
 
     # Approval workflow (Admin approves new accounts before login is allowed)
@@ -138,6 +166,52 @@ class Mpin(models.Model):
 
     def __str__(self):
         return f"MPIN for {self.user}"
+
+
+class EmailOTP(models.Model):
+    """Short-lived OTP sent to a user's registered email. Two purposes so
+    far:
+      - mpin_change: authenticated flow from the Profile page's
+        "Change M-PIN" button.
+      - mpin_forgot: UNauthenticated flow from the login screen's
+        "Forgot M-PIN?" link — identity is proven purely via the OTP
+        landing in the account's registered inbox, since the whole point
+        is the person doesn't have a working M-PIN (or password) handy.
+    Both share this same model/table; only `purpose` and which view
+    creates/consumes the row differ."""
+
+    PURPOSE_MPIN_CHANGE = "mpin_change"
+    PURPOSE_MPIN_FORGOT = "mpin_forgot"
+    PURPOSE_CHOICES = [
+        (PURPOSE_MPIN_CHANGE, "M-PIN Change"),
+        (PURPOSE_MPIN_FORGOT, "M-PIN Forgot/Reset"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="email_otps"
+    )
+    purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
+    otp_hash = models.CharField(max_length=128)
+    is_verified = models.BooleanField(default=False)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "email_otps"
+        ordering = ["-created_at"]
+
+    def set_otp(self, raw_otp):
+        self.otp_hash = make_password(raw_otp)
+
+    def check_otp(self, raw_otp):
+        return check_password(raw_otp, self.otp_hash)
+
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    def __str__(self):
+        return f"OTP({self.purpose}) for {self.user}"
 
 
 # ---------------------------------------------------------------------------

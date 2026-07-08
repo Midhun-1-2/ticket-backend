@@ -137,6 +137,15 @@ class TicketAssignment(models.Model):
     row flips to 'transferred', and a new 'accepted' row is created for the
     incoming staff member (no race, since it's a direct handoff rather than
     a fresh multi-staff offer).
+
+    IMPORTANT: because of the unique_together constraint below, this table
+    holds only the CURRENT status per (ticket, staff) pair — if the same
+    staff member is offered the same ticket again later (e.g. it bounces
+    back to them after going elsewhere), their existing row is reused and
+    overwritten rather than a new one being created. That makes this table
+    unsuitable as a full history log on its own — see TicketAssignmentEvent
+    below for the permanent, append-only version used to show a ticket's
+    complete assignment trail (HolderChip's tooltip on the frontend).
     """
     STATUS_CHOICES = [
         ('pending', 'Pending'),
@@ -174,6 +183,62 @@ class TicketAssignment(models.Model):
 
     def __str__(self):
         return f"{self.ticket_id} -> {self.staff} ({self.status})"
+
+
+class TicketAssignmentEvent(models.Model):
+    """
+    Append-only, permanent audit trail of every assignment-related action
+    on a ticket: offered, accepted, declined, lost-the-race (unavailable),
+    transferred, escalated. Every row is a separate, immutable event — this
+    is what makes it possible to show a ticket's FULL journey even when the
+    same staff member is involved more than once (e.g. Godson accepts,
+    it's later transferred to John, then back to Godson again — both of
+    Godson's appearances get their own row here, unlike TicketAssignment
+    above, which would collapse them into one overwritten row).
+
+    Nothing here is ever updated or deleted after creation — only new rows
+    are appended, via log_assignment_event() in views.py.
+    """
+    ACTION_CHOICES = [
+        ('offered', 'Offered'),
+        ('accepted', 'Accepted'),
+        ('declined', 'Declined'),
+        ('unavailable', 'Unavailable'),
+        ('transferred', 'Transferred'),
+        ('escalated', 'Escalated'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='assignment_events')
+    action = models.CharField(max_length=15, choices=ACTION_CHOICES)
+
+    # Who this event is primarily about — the staff being offered to, who
+    # accepted/declined, who lost the race, or (for transferred/escalated)
+    # the OUTGOING staff member. Null for a transfer/escalate out of an
+    # unassigned ticket.
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ticket_assignment_events',
+    )
+    # Only set for 'transferred'/'escalated' — who it was handed to.
+    to_staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ticket_assignment_events_received',
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.ticket_id}: {self.action} ({self.staff})"
 
 
 class ProductMaster(models.Model):

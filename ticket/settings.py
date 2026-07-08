@@ -143,8 +143,16 @@ CORS_ALLOWED_ORIGINS = [
 # once an admin approves a company. The console backend just prints
 # emails to the terminal running `manage.py runserver` — good enough for
 # development. Swap to an SMTP backend before going to production.
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'no-reply@ticketdesk.local'
+#
+# Also now used by the M-PIN change OTP flow (authentication.views.
+# RequestMpinChangeOtpView) — same backend, no extra config needed.
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'caketalesmidhun2026@gmail.com'          # the Gmail account you generated the App Password for
+EMAIL_HOST_PASSWORD = 'lcdzbregommwseoy'           # the 16-char App Password, spaces removed
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 
 # Internationalization

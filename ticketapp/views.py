@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from authentication.models import StaffAssignment
 from authentication.permissions import IsAdmin, IsAdminOrStaff
 
-from .models import Category, Ticket, TicketAssignment, ProductMaster
+from .models import Category, Ticket, TicketAssignment, TicketAssignmentEvent, ProductMaster
 from .serializers import (
     CategorySerializer,
     TicketSerializer,
@@ -18,11 +18,22 @@ from .serializers import (
     TransferTicketSerializer,
     EscalateTicketSerializer,
     TicketAssignmentSerializer,
+    TicketAssignmentEventSerializer,
     ProductMasterSerializer,
     PublicProductSerializer,
 )
 
 User = get_user_model()
+
+
+def log_assignment_event(ticket, action, staff=None, to_staff=None, note=''):
+    """Appends one permanent row to TicketAssignmentEvent. Called from
+    every place below that changes who holds a ticket or how — never
+    updates an existing row, only ever creates new ones, so a ticket that
+    bounces between the same staff member more than once keeps every hop."""
+    TicketAssignmentEvent.objects.create(
+        ticket=ticket, action=action, staff=staff, to_staff=to_staff, note=note,
+    )
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -82,21 +93,30 @@ def get_eligible_staff_ids(ticket):
 
 def offer_ticket_to_eligible_staff(ticket):
     """
-    Called right after a ticket is created. Creates a 'pending'
-    TicketAssignment for every staff member returned by
-    get_eligible_staff_ids(). If the customer's company has no current
-    staff assignment, the ticket is simply left with no offers (falls to
-    admin to handle manually).
+    Called right after a ticket is created (and again on reopen — see
+    RevokeTicketView). Creates a 'pending' TicketAssignment for every staff
+    member returned by get_eligible_staff_ids(). If a row for that staff
+    member already exists (e.g. on reopen, where they may have an old
+    'accepted'/'declined'/'transferred' row), it's reset back to 'pending'
+    rather than left stale — same pattern TransferTicketView uses. If the
+    customer's company has no current staff assignment, the ticket is
+    simply left with no offers (falls to admin to handle manually).
     """
     staff_ids = get_eligible_staff_ids(ticket)
 
-    created = []
+    touched = []
     for staff_id in staff_ids:
-        obj, _ = TicketAssignment.objects.get_or_create(
+        obj, was_created = TicketAssignment.objects.get_or_create(
             ticket=ticket, staff_id=staff_id, defaults={'status': 'pending'}
         )
-        created.append(obj)
-    return created
+        if not was_created and obj.status != 'pending':
+            obj.status = 'pending'
+            obj.responded_at = None
+            obj.transferred_to = None
+            obj.save(update_fields=['status', 'responded_at', 'transferred_to'])
+        touched.append(obj)
+        log_assignment_event(ticket, 'offered', staff=obj.staff)
+    return touched
 
 
 class TicketListCreateView(generics.ListCreateAPIView):
@@ -179,6 +199,24 @@ class TicketEligibleStaffView(APIView):
         return Response({'staff_ids': list(get_eligible_staff_ids(ticket))})
 
 
+class TicketAssignmentHistoryView(generics.ListAPIView):
+    """
+    GET /tickets/<uuid:pk>/assignment-history/
+    Full, permanent, chronological audit trail for one ticket's assignment
+    journey — every offer/accept/decline/transfer/escalate event, each its
+    own immutable row. This is what HolderChip's tooltip on the Ticket
+    Assignment page should read from instead of deriving history from the
+    (mutable, per-staff-collapsed) TicketAssignment rows.
+    """
+    serializer_class = TicketAssignmentEventSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+
+    def get_queryset(self):
+        return TicketAssignmentEvent.objects.filter(
+            ticket_id=self.kwargs['pk']
+        ).select_related('staff', 'to_staff')
+
+
 class TicketStatusUpdateView(APIView):
     """
     PATCH /tickets/<id>/status/  { status }
@@ -200,6 +238,56 @@ class TicketStatusUpdateView(APIView):
 
         ticket.status = serializer.validated_data['status']
         ticket.save(update_fields=['status', 'updated_at'])
+        return Response(TicketSerializer(ticket).data)
+
+
+class RevokeTicketView(APIView):
+    """
+    POST /tickets/<id>/revoke/
+    Lets the CUSTOMER who raised a ticket reopen it once it's Resolved or
+    Closed (see CustomerDashboard.jsx's "Reopen Ticket" button — the
+    frontend still calls this endpoint 'revoke' internally). This is
+    customer-initiated, unlike TicketStatusUpdateView, which only staff/
+    admin can call and which deliberately excludes 'Open' as a target.
+
+    On reopen the ticket goes back to 'Open' and is unassigned, then
+    re-offered to whichever staff are currently eligible for this
+    customer's company/product — the same triage flow a brand-new ticket
+    goes through — since whoever resolved it before may no longer be the
+    right owner (or may not even be assigned to this customer anymore).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    REVOCABLE_STATUSES = ('Resolved', 'Closed')
+
+    def post(self, request, pk):
+        ticket = Ticket.objects.filter(id=pk).first()
+        if not ticket:
+            return Response({'detail': 'Ticket not found.'}, status=404)
+
+        if getattr(request.user, 'role', None) != 'customer' or ticket.raised_by_id != request.user.id:
+            return Response({'detail': 'You can only reopen tickets you raised.'}, status=403)
+
+        if ticket.status not in self.REVOCABLE_STATUSES:
+            return Response(
+                {'detail': 'Only resolved or closed tickets can be reopened.'},
+                status=400,
+            )
+
+        with transaction.atomic():
+            outgoing_staff = ticket.assigned_staff
+
+            ticket.status = 'Open'
+            ticket.assigned_staff = None
+            ticket.save(update_fields=['status', 'assigned_staff', 'updated_at'])
+
+            # 'reopened' isn't in TicketAssignmentEvent.ACTION_CHOICES, so this
+            # logs as an 'offered' event with a note explaining why — avoids a
+            # migration just for one extra label. Swap in a real 'reopened'
+            # choice + migration later if you want it distinguished in the UI.
+            log_assignment_event(ticket, 'offered', staff=outgoing_staff, note='Ticket reopened by customer')
+            offer_ticket_to_eligible_staff(ticket)
+
         return Response(TicketSerializer(ticket).data)
 
 
@@ -240,6 +328,7 @@ class TransferTicketView(APIView):
 
         with transaction.atomic():
             outgoing_staff_id = ticket.assigned_staff_id
+            outgoing_staff = ticket.assigned_staff
             if outgoing_staff_id:
                 TicketAssignment.objects.filter(
                     ticket=ticket, staff_id=outgoing_staff_id
@@ -256,6 +345,12 @@ class TransferTicketView(APIView):
                 incoming.responded_at = None
                 incoming.transferred_to = None
                 incoming.save(update_fields=['status', 'responded_at', 'transferred_to'])
+
+            # Permanent log entry for this hop — recorded regardless of
+            # whether TicketAssignment above created a fresh row or
+            # overwrote an existing one, so the full trail survives even
+            # if this same staff member has held the ticket before.
+            log_assignment_event(ticket, 'transferred', staff=outgoing_staff, to_staff=new_staff)
 
             # Unassigned until the new staff member accepts — see
             # AcceptTicketAssignmentView, which only rejects an accept when
@@ -304,6 +399,7 @@ class EscalateTicketView(APIView):
 
         with transaction.atomic():
             outgoing_staff_id = ticket.assigned_staff_id
+            outgoing_staff = ticket.assigned_staff
             if outgoing_staff_id and outgoing_staff_id != admin_user.id:
                 TicketAssignment.objects.filter(
                     ticket=ticket, staff_id=outgoing_staff_id
@@ -320,6 +416,8 @@ class EscalateTicketView(APIView):
                 incoming.responded_at = timezone.now()
                 incoming.transferred_to = None
                 incoming.save(update_fields=['status', 'responded_at', 'transferred_to'])
+
+            log_assignment_event(ticket, 'escalated', staff=outgoing_staff, to_staff=admin_user, note=reason)
 
             ticket.assigned_staff = admin_user
             ticket.escalated = True
@@ -417,6 +515,7 @@ class AcceptTicketAssignmentView(APIView):
                 assignment.status = 'unavailable'
                 assignment.responded_at = timezone.now()
                 assignment.save(update_fields=['status', 'responded_at'])
+                log_assignment_event(ticket, 'unavailable', staff=assignment.staff)
                 return Response(
                     {'detail': 'This ticket was already accepted by another staff member.'},
                     status=409,
@@ -425,17 +524,28 @@ class AcceptTicketAssignmentView(APIView):
             assignment.status = 'accepted'
             assignment.responded_at = timezone.now()
             assignment.save(update_fields=['status', 'responded_at'])
+            log_assignment_event(ticket, 'accepted', staff=assignment.staff)
 
             ticket.assigned_staff = request.user
             if ticket.status == 'Open':
                 ticket.status = 'In Progress'
             ticket.save(update_fields=['assigned_staff', 'status', 'updated_at'])
 
+            # Captured as a list BEFORE the bulk update below, since
+            # .update() doesn't give per-row access — needed to log each
+            # affected staff member's 'unavailable' event individually.
+            other_pending = list(
+                TicketAssignment.objects.filter(
+                    ticket=ticket, status='pending'
+                ).exclude(id=assignment.id).select_related('staff')
+            )
             TicketAssignment.objects.filter(
                 ticket=ticket, status='pending'
             ).exclude(id=assignment.id).update(
                 status='unavailable', responded_at=timezone.now()
             )
+            for other in other_pending:
+                log_assignment_event(ticket, 'unavailable', staff=other.staff)
 
         return Response(TicketAssignmentSerializer(assignment).data)
 
@@ -455,6 +565,7 @@ class DeclineTicketAssignmentView(APIView):
         assignment.status = 'declined'
         assignment.responded_at = timezone.now()
         assignment.save(update_fields=['status', 'responded_at'])
+        log_assignment_event(assignment.ticket, 'declined', staff=assignment.staff)
         return Response(TicketAssignmentSerializer(assignment).data)
 
 

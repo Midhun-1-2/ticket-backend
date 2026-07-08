@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Category, Ticket, TicketAttachment, TicketAssignment, ProductMaster
+from .models import Category, Ticket, TicketAttachment, TicketAssignment, TicketAssignmentEvent, ProductMaster
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -143,6 +143,20 @@ class TicketAssignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = TicketAssignment
         fields = ['id', 'ticket', 'staff', 'status', 'offered_at', 'responded_at', 'transferred_to']
+        read_only_fields = fields
+
+
+class TicketAssignmentEventSerializer(serializers.ModelSerializer):
+    """Full permanent audit trail row — see TicketAssignmentEvent's
+    docstring in models.py for why this exists separately from
+    TicketAssignmentSerializer above (that one only reflects CURRENT
+    per-staff status; this one never overwrites anything)."""
+    staff = RaisedBySerializer(read_only=True)
+    to_staff = RaisedBySerializer(read_only=True)
+
+    class Meta:
+        model = TicketAssignmentEvent
+        fields = ['id', 'action', 'staff', 'to_staff', 'note', 'created_at']
         read_only_fields = fields
 
 

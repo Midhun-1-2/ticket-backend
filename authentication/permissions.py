@@ -27,3 +27,4 @@ class IsAdmin(BasePermission):
             and user.is_authenticated
             and getattr(user, "role", None) == "admin"
         )
+    

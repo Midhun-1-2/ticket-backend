@@ -21,6 +21,7 @@ from .serializers import (
     TicketAssignmentEventSerializer,
     ProductMasterSerializer,
     PublicProductSerializer,
+    _product_in_use,
 )
 
 User = get_user_model()
@@ -164,6 +165,19 @@ class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
             qs = qs.filter(raised_by=user)
         return qs
 
+    def perform_update(self, serializer):
+        # status is read_only on TicketSerializer, so it only ever changes
+        # here via a raw PATCH like AllTickets.jsx sends — mirror the same
+        # closed_at bookkeeping TicketStatusUpdateView does, so closing a
+        # ticket from either screen behaves identically.
+        new_status = self.request.data.get('status')
+        instance = serializer.instance
+        if new_status == 'Closed' and instance.status != 'Closed':
+            serializer.save(closed_at=timezone.now())
+        elif new_status and new_status != 'Closed' and instance.closed_at is not None:
+            serializer.save(closed_at=None)
+        else:
+            serializer.save()
 
 def _can_manage_ticket(user, ticket):
     """
@@ -235,9 +249,21 @@ class TicketStatusUpdateView(APIView):
 
         serializer = TicketStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
 
-        ticket.status = serializer.validated_data['status']
-        ticket.save(update_fields=['status', 'updated_at'])
+        ticket.status = new_status
+        update_fields = ['status', 'updated_at']
+
+        if new_status == 'Closed':
+            ticket.closed_at = timezone.now()
+            update_fields.append('closed_at')
+        elif ticket.closed_at is not None:
+            # Reopened after being closed — clear the stale timestamp so
+            # closed_at always reflects the *current* closure, not a past one.
+            ticket.closed_at = None
+            update_fields.append('closed_at')
+
+        ticket.save(update_fields=update_fields)
         return Response(TicketSerializer(ticket).data)
 
 
@@ -576,7 +602,11 @@ class DeclineTicketAssignmentView(APIView):
 class ProductMasterListCreateView(generics.ListCreateAPIView):
     """
     GET  /products/   — admin only. ?include_inactive=true to see disabled products too.
-    POST /products/   — {name, version, activation_date}
+    POST /products/   — {name, version, activation_date}. Used both for
+                        creating a brand-new product AND for adding a new
+                        version of an existing one (same name, different
+                        version) — see ProductMasterPage.jsx's
+                        "Add New Version" action.
     """
     serializer_class = ProductMasterSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
@@ -593,6 +623,19 @@ class ProductMasterDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductMasterSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
     queryset = ProductMaster.objects.all()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # Same lock pattern as CategoryDetailView.destroy — refuse the
+        # delete with a clean 409 rather than orphaning tickets/company
+        # records that still reference this product by name.
+        if _product_in_use(instance):
+            return Response(
+                {"detail": "This product is in use by existing tickets or customer records and cannot be deleted."},
+                status=409,
+            )
+        instance.delete()
+        return Response(status=204)
 
 
 class PublicProductListView(generics.ListAPIView):

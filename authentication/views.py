@@ -171,6 +171,30 @@ class DetectRoleView(APIView):
         serializer.is_valid(raise_exception=True)
         return Response(serializer.to_role_response())
 
+class CheckMobileAvailabilityView(APIView):
+    """
+    GET /check-mobile/?mobile_number=9845021190
+    Public, read-only pre-check used by the onboarding form's Primary
+    Contact step to warn the person a mobile number is already registered
+    *before* they reach final submit — where
+    CompanySubmitSerializer.validate_mobile_number would otherwise reject
+    it with the same message. "Already registered" means a CustomUser row
+    already has this phone_number, mirroring that check exactly.
+
+    NOTE: CustomUser.phone_number (and Company.mobile_number) are plain
+    10-digit fields with no stored country code — same format
+    validate_mobile_number enforces at submit time. `country_code` is
+    accepted here for forward-compatibility with the multi-country
+    onboarding UI but isn't used in the lookup, since stored numbers
+    aren't country-scoped today (see note above).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        mobile_number = (request.query_params.get("mobile_number") or "").strip()
+        exists = bool(mobile_number) and User.objects.filter(phone_number=mobile_number).exists()
+        return Response({"exists": exists})
+
 
 # ---------------------------------------------------------------------------
 # Onboarding — public draft/submit endpoints

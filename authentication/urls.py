@@ -24,6 +24,10 @@ urlpatterns = [
     path("onboarding/<int:company_id>/revoke/", views.RevokeCompanyApprovalView.as_view(), name="onboarding-revoke"),
     path("onboarding/<int:company_id>/verify-products/", views.VerifyProductsView.as_view(), name="onboarding-verify-products"),
     path("onboarding/<int:company_id>/assign-staff/", views.AssignStaffView.as_view(), name="onboarding-assign-staff"),
+    # Onboarding — public
+    path("onboarding/draft/", views.OnboardingDraftView.as_view(), name="onboarding-draft"),
+    path("onboarding/submit/", views.OnboardingSubmitView.as_view(), name="onboarding-submit"),
+    path("check-mobile/", views.CheckMobileAvailabilityView.as_view(), name="check-mobile"),
 
     # Staff Management
     path("staff/", views.StaffListCreateView.as_view(), name="staff-list-create"),

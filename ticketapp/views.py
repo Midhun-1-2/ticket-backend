@@ -9,6 +9,13 @@ from rest_framework.views import APIView
 
 from authentication.models import StaffAssignment
 from authentication.permissions import IsAdmin, IsAdminOrStaff
+from authentication.email_templates import (
+    build_ticket_raised_email_html,
+    build_ticket_raised_email_text,
+    build_ticket_resolved_email_html,
+    build_ticket_resolved_email_text,
+    send_branded_email,
+)
 
 from .models import Category, Ticket, TicketAssignment, TicketAssignmentEvent, ProductMaster
 from .serializers import (
@@ -21,7 +28,6 @@ from .serializers import (
     TicketAssignmentEventSerializer,
     ProductMasterSerializer,
     PublicProductSerializer,
-    _product_in_use,
 )
 
 User = get_user_model()
@@ -35,6 +41,53 @@ def log_assignment_event(ticket, action, staff=None, to_staff=None, note=''):
     TicketAssignmentEvent.objects.create(
         ticket=ticket, action=action, staff=staff, to_staff=to_staff, note=note,
     )
+
+
+def send_ticket_raised_email(ticket):
+    """Confirmation email to the customer right after they raise a
+    ticket. Fails silently (logged, not raised) so a flaky mail server
+    never turns a successful ticket creation into a 500 — the ticket
+    itself is already committed by the time this runs."""
+    customer = ticket.raised_by
+    if not customer or not customer.email:
+        return
+    try:
+        text_body = build_ticket_raised_email_text(
+            customer.full_name or customer.phone_number,
+            ticket.id, ticket.subject, ticket.category.name, ticket.priority,
+            ticket.product, ticket.description,
+        )
+        html_body = build_ticket_raised_email_html(
+            customer.full_name or customer.phone_number,
+            ticket.id, ticket.subject, ticket.category.name, ticket.priority,
+            ticket.product, ticket.description,
+        )
+        send_branded_email(customer.email, "We've got your ticket", text_body, html_body)
+    except Exception:
+        # Deliberately swallowed — see docstring above. Ticket creation
+        # must succeed even if the mail server is down.
+        pass
+
+
+def send_ticket_resolved_email(ticket, resolved_by):
+    """Notification email to the customer when their ticket moves to
+    Resolved. Same fail-silently reasoning as send_ticket_raised_email."""
+    customer = ticket.raised_by
+    if not customer or not customer.email:
+        return
+    try:
+        resolved_by_name = getattr(resolved_by, 'full_name', '') or None
+        text_body = build_ticket_resolved_email_text(
+            customer.full_name or customer.phone_number,
+            ticket.id, ticket.subject, resolved_by_name,
+        )
+        html_body = build_ticket_resolved_email_html(
+            customer.full_name or customer.phone_number,
+            ticket.id, ticket.subject, resolved_by_name,
+        )
+        send_branded_email(customer.email, "Your ticket has been resolved", text_body, html_body)
+    except Exception:
+        pass
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -143,6 +196,7 @@ class TicketListCreateView(generics.ListCreateAPIView):
         for f in self.request.FILES.getlist('attachments'):
             ticket.attachments.create(file=f)
         offer_ticket_to_eligible_staff(ticket)
+        send_ticket_raised_email(ticket)
 
 
 class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -165,19 +219,6 @@ class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
             qs = qs.filter(raised_by=user)
         return qs
 
-    def perform_update(self, serializer):
-        # status is read_only on TicketSerializer, so it only ever changes
-        # here via a raw PATCH like AllTickets.jsx sends — mirror the same
-        # closed_at bookkeeping TicketStatusUpdateView does, so closing a
-        # ticket from either screen behaves identically.
-        new_status = self.request.data.get('status')
-        instance = serializer.instance
-        if new_status == 'Closed' and instance.status != 'Closed':
-            serializer.save(closed_at=timezone.now())
-        elif new_status and new_status != 'Closed' and instance.closed_at is not None:
-            serializer.save(closed_at=None)
-        else:
-            serializer.save()
 
 def _can_manage_ticket(user, ticket):
     """
@@ -249,21 +290,17 @@ class TicketStatusUpdateView(APIView):
 
         serializer = TicketStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        new_status = serializer.validated_data['status']
 
-        ticket.status = new_status
-        update_fields = ['status', 'updated_at']
+        previous_status = ticket.status
+        ticket.status = serializer.validated_data['status']
+        ticket.save(update_fields=['status', 'updated_at'])
 
-        if new_status == 'Closed':
-            ticket.closed_at = timezone.now()
-            update_fields.append('closed_at')
-        elif ticket.closed_at is not None:
-            # Reopened after being closed — clear the stale timestamp so
-            # closed_at always reflects the *current* closure, not a past one.
-            ticket.closed_at = None
-            update_fields.append('closed_at')
+        # Only fire on the transition INTO Resolved, not every save while
+        # it's already sitting at Resolved (e.g. no-op PATCHes) or moves
+        # between other statuses.
+        if ticket.status == 'Resolved' and previous_status != 'Resolved':
+            send_ticket_resolved_email(ticket, request.user)
 
-        ticket.save(update_fields=update_fields)
         return Response(TicketSerializer(ticket).data)
 
 
@@ -602,11 +639,7 @@ class DeclineTicketAssignmentView(APIView):
 class ProductMasterListCreateView(generics.ListCreateAPIView):
     """
     GET  /products/   — admin only. ?include_inactive=true to see disabled products too.
-    POST /products/   — {name, version, activation_date}. Used both for
-                        creating a brand-new product AND for adding a new
-                        version of an existing one (same name, different
-                        version) — see ProductMasterPage.jsx's
-                        "Add New Version" action.
+    POST /products/   — {name, version, activation_date}
     """
     serializer_class = ProductMasterSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
@@ -623,19 +656,6 @@ class ProductMasterDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductMasterSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
     queryset = ProductMaster.objects.all()
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-        # Same lock pattern as CategoryDetailView.destroy — refuse the
-        # delete with a clean 409 rather than orphaning tickets/company
-        # records that still reference this product by name.
-        if _product_in_use(instance):
-            return Response(
-                {"detail": "This product is in use by existing tickets or customer records and cannot be deleted."},
-                status=409,
-            )
-        instance.delete()
-        return Response(status=204)
 
 
 class PublicProductListView(generics.ListAPIView):

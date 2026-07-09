@@ -1,7 +1,5 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomerListView, CustomerDetailView, CustomerDeactivateView, CustomerAddProductView, CustomerRemoveProductView
-
 from . import views
 
 urlpatterns = [
@@ -41,11 +39,11 @@ urlpatterns = [
     path("staff-departments/<int:department_id>/", views.StaffDepartmentDeleteView.as_view(), name="staff-departments-delete"),
 
     #Customer Management
-    path("customers/", CustomerListView.as_view(), name="customer-list"),
-    path("customers/<int:pk>/", CustomerDetailView.as_view(), name="customer-detail"),
-    path("customers/<int:pk>/deactivate/", CustomerDeactivateView.as_view(), name="customer-deactivate"),
-    path("customers/<int:pk>/products/", CustomerAddProductView.as_view(), name="customer-add-product"),
-    path("customers/<int:pk>/products/<int:product_id>/", CustomerRemoveProductView.as_view(), name="customer-remove-product"),
+    path("customers/", views.CustomerListView.as_view(), name="customer-list"),
+    path("customers/<int:pk>/", views.CustomerDetailView.as_view(), name="customer-detail"),
+    path("customers/<int:pk>/deactivate/", views.CustomerDeactivateView.as_view(), name="customer-deactivate"),
+    path("customers/<int:pk>/products/", views.CustomerAddProductView.as_view(), name="customer-add-product"),
+    path("customers/<int:pk>/products/<int:product_id>/", views.CustomerRemoveProductView.as_view(), name="customer-remove-product"),
 
     path('my-products/', views.MyProductsView.as_view(), name='my-products'),
 

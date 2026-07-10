@@ -304,56 +304,6 @@ class TicketStatusUpdateView(APIView):
         return Response(TicketSerializer(ticket).data)
 
 
-class RevokeTicketView(APIView):
-    """
-    POST /tickets/<id>/revoke/
-    Lets the CUSTOMER who raised a ticket reopen it once it's Resolved or
-    Closed (see CustomerDashboard.jsx's "Reopen Ticket" button — the
-    frontend still calls this endpoint 'revoke' internally). This is
-    customer-initiated, unlike TicketStatusUpdateView, which only staff/
-    admin can call and which deliberately excludes 'Open' as a target.
-
-    On reopen the ticket goes back to 'Open' and is unassigned, then
-    re-offered to whichever staff are currently eligible for this
-    customer's company/product — the same triage flow a brand-new ticket
-    goes through — since whoever resolved it before may no longer be the
-    right owner (or may not even be assigned to this customer anymore).
-    """
-    permission_classes = [permissions.IsAuthenticated]
-
-    REVOCABLE_STATUSES = ('Resolved', 'Closed')
-
-    def post(self, request, pk):
-        ticket = Ticket.objects.filter(id=pk).first()
-        if not ticket:
-            return Response({'detail': 'Ticket not found.'}, status=404)
-
-        if getattr(request.user, 'role', None) != 'customer' or ticket.raised_by_id != request.user.id:
-            return Response({'detail': 'You can only reopen tickets you raised.'}, status=403)
-
-        if ticket.status not in self.REVOCABLE_STATUSES:
-            return Response(
-                {'detail': 'Only resolved or closed tickets can be reopened.'},
-                status=400,
-            )
-
-        with transaction.atomic():
-            outgoing_staff = ticket.assigned_staff
-
-            ticket.status = 'Open'
-            ticket.assigned_staff = None
-            ticket.save(update_fields=['status', 'assigned_staff', 'updated_at'])
-
-            # 'reopened' isn't in TicketAssignmentEvent.ACTION_CHOICES, so this
-            # logs as an 'offered' event with a note explaining why — avoids a
-            # migration just for one extra label. Swap in a real 'reopened'
-            # choice + migration later if you want it distinguished in the UI.
-            log_assignment_event(ticket, 'offered', staff=outgoing_staff, note='Ticket reopened by customer')
-            offer_ticket_to_eligible_staff(ticket)
-
-        return Response(TicketSerializer(ticket).data)
-
-
 class TransferTicketView(APIView):
     """
     POST /tickets/<id>/transfer/  { staff_id }

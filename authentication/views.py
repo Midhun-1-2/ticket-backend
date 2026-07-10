@@ -662,10 +662,14 @@ class CustomerListView(generics.ListAPIView):
         return qs.order_by("-date_joined")
 
 
-class CustomerDetailView(generics.RetrieveUpdateAPIView):
+class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
-    GET   /customers/<id>/   — full detail for the View panel
-    PATCH /customers/<id>/   — Edit action (name/email/phone only)
+    GET    /customers/<id>/   — full detail for the View panel
+    PATCH  /customers/<id>/   — Edit action (name/email/phone only)
+    DELETE /customers/<id>/   — permanently removes the account. Blocked
+                                 (409) if the customer has raised any
+                                 tickets — see DeleteCustomerModal.jsx,
+                                 which surfaces this same rule client-side.
     """
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
     queryset = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
@@ -681,6 +685,18 @@ class CustomerDetailView(generics.RetrieveUpdateAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(CustomerDetailSerializer(instance).data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        ticket_count = Ticket.objects.filter(raised_by=instance).count()
+        if ticket_count:
+            noun = "ticket" if ticket_count == 1 else "tickets"
+            return Response(
+                {"detail": f"{instance.full_name} has raised {ticket_count} {noun} and cannot be deleted."},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+        instance.delete()
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
 class CustomerDeactivateView(APIView):

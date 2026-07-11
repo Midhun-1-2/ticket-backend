@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from authentication.models import StaffAssignment
+from authentication.models import StaffAssignment, StaffProduct
 from authentication.permissions import IsAdmin, IsAdminOrStaff
 from authentication.email_templates import (
     build_ticket_raised_email_html,
@@ -17,7 +17,10 @@ from authentication.email_templates import (
     send_branded_email,
 )
 
-from .models import Category, Ticket, TicketAssignment, TicketAssignmentEvent, ProductMaster
+from .models import (
+    Category, Ticket, TicketAssignment, TicketAssignmentEvent,
+    TicketStatusHistory, ProductMaster,
+)
 from .serializers import (
     CategorySerializer,
     TicketSerializer,
@@ -26,6 +29,7 @@ from .serializers import (
     EscalateTicketSerializer,
     TicketAssignmentSerializer,
     TicketAssignmentEventSerializer,
+    TicketStatusHistorySerializer,
     ProductMasterSerializer,
     PublicProductSerializer,
 )
@@ -34,20 +38,14 @@ User = get_user_model()
 
 
 def log_assignment_event(ticket, action, staff=None, to_staff=None, note=''):
-    """Appends one permanent row to TicketAssignmentEvent. Called from
-    every place below that changes who holds a ticket or how — never
-    updates an existing row, only ever creates new ones, so a ticket that
-    bounces between the same staff member more than once keeps every hop."""
+    """Appends one permanent row to TicketAssignmentEvent."""
     TicketAssignmentEvent.objects.create(
         ticket=ticket, action=action, staff=staff, to_staff=to_staff, note=note,
     )
 
 
 def send_ticket_raised_email(ticket):
-    """Confirmation email to the customer right after they raise a
-    ticket. Fails silently (logged, not raised) so a flaky mail server
-    never turns a successful ticket creation into a 500 — the ticket
-    itself is already committed by the time this runs."""
+    """Confirmation email to the customer right after they raise a ticket. Fails silently."""
     customer = ticket.raised_by
     if not customer or not customer.email:
         return
@@ -64,14 +62,12 @@ def send_ticket_raised_email(ticket):
         )
         send_branded_email(customer.email, "We've got your ticket", text_body, html_body)
     except Exception:
-        # Deliberately swallowed — see docstring above. Ticket creation
-        # must succeed even if the mail server is down.
+        # Ticket creation must succeed even if the mail server is down.
         pass
 
 
 def send_ticket_resolved_email(ticket, resolved_by):
-    """Notification email to the customer when their ticket moves to
-    Resolved. Same fail-silently reasoning as send_ticket_raised_email."""
+    """Notification email to the customer when their ticket moves to Resolved."""
     customer = ticket.raised_by
     if not customer or not customer.email:
         return
@@ -108,9 +104,7 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        # Categories referenced by any ticket can't be removed — the FK is
-        # PROTECT anyway (see Ticket.category), so this just gives a clean
-        # 409 with a message instead of letting an IntegrityError bubble up.
+        # Categories referenced by any ticket can't be removed.
         if instance.tickets.exists():
             return Response(
                 {"detail": "This category is in use by existing tickets and cannot be deleted."},
@@ -125,37 +119,29 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 # ---------------------------------------------------------------------------
 
 def get_eligible_staff_ids(ticket):
-    """
-    Staff currently tied to the ticket's raising company — either as
-    primary staff (StaffAssignment.product_name == '') or scoped to this
-    ticket's product. This is the same pool a ticket is originally offered
-    to (see offer_ticket_to_eligible_staff below); reused here so the
-    Transfer picker can group "assigned to this customer" vs "other staff"
-    without duplicating the query.
-    """
+    """Staff currently tied to the ticket's raising company, primary or scoped to its product."""
     raiser = ticket.raised_by
     company = getattr(raiser, 'company', None) if raiser else None
     if not company:
         return set()
 
-    return set(
+    company_staff_ids = set(
         StaffAssignment.objects.filter(company=company, is_current=True)
         .filter(Q(product_name='') | Q(product_name=ticket.product))
         .values_list('staff_id', flat=True)
     )
 
+    # Narrow to staff configured (via Product Master) to handle this specific product.
+    product_staff_ids = set(
+        StaffProduct.objects.filter(product_name=ticket.product).values_list('staff_id', flat=True)
+    )
+    if product_staff_ids:
+        return company_staff_ids & product_staff_ids
+    return company_staff_ids
+
 
 def offer_ticket_to_eligible_staff(ticket):
-    """
-    Called right after a ticket is created (and again on reopen — see
-    RevokeTicketView). Creates a 'pending' TicketAssignment for every staff
-    member returned by get_eligible_staff_ids(). If a row for that staff
-    member already exists (e.g. on reopen, where they may have an old
-    'accepted'/'declined'/'transferred' row), it's reset back to 'pending'
-    rather than left stale — same pattern TransferTicketView uses. If the
-    customer's company has no current staff assignment, the ticket is
-    simply left with no offers (falls to admin to handle manually).
-    """
+    """Creates a 'pending' TicketAssignment for every eligible staff member, called on ticket creation/reopen."""
     staff_ids = get_eligible_staff_ids(ticket)
 
     touched = []
@@ -174,11 +160,7 @@ def offer_ticket_to_eligible_staff(ticket):
 
 
 class TicketListCreateView(generics.ListCreateAPIView):
-    """
-    GET  /tickets/   — customers see only their own tickets; staff/admin see all
-    POST /tickets/   — multipart form: subject, category, priority, description,
-                        product, and any number of 'attachments' files
-    """
+    """List/create tickets — scoped to own tickets for customers/staff, all for admin."""
     serializer_class = TicketSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -186,9 +168,12 @@ class TicketListCreateView(generics.ListCreateAPIView):
         user = self.request.user
         qs = Ticket.objects.select_related(
             'category', 'raised_by', 'assigned_staff'
-        ).prefetch_related('attachments')
-        if getattr(user, 'role', None) == 'customer':
+        ).prefetch_related('attachments', 'status_history')
+        role = getattr(user, 'role', None)
+        if role == 'customer':
             qs = qs.filter(raised_by=user)
+        elif role == 'staff':
+            qs = qs.filter(assigned_staff=user)
         return qs
 
     def perform_create(self, serializer):
@@ -200,13 +185,7 @@ class TicketListCreateView(generics.ListCreateAPIView):
 
 
 class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """
-    GET/PATCH/PUT/DELETE /tickets/<uuid>/
-    Customers can only access their own tickets; staff/admin can access any.
-    Used by the Ticket Assignment detail popup to pull full ticket info
-    (description, attachments) for both the assignee's own tickets and
-    ones taken by another staff member.
-    """
+    """Retrieve/update/delete a ticket. Customers can only access their own."""
     serializer_class = TicketSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -214,22 +193,14 @@ class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
         user = self.request.user
         qs = Ticket.objects.select_related(
             'category', 'raised_by', 'assigned_staff'
-        ).prefetch_related('attachments')
+        ).prefetch_related('attachments', 'status_history')
         if getattr(user, 'role', None) == 'customer':
             qs = qs.filter(raised_by=user)
         return qs
 
 
 def _can_manage_ticket(user, ticket):
-    """
-    Who can change a ticket's status, transfer it, or escalate it:
-      - Unassigned ticket -> admin only (no one else has claimed it yet).
-      - Assigned to an admin (still actively escalated) -> admin only.
-      - Assigned to a real staff member -> ONLY that staff member. Once a
-        ticket has been handed to staff, it's their ticket to run —
-        admin reverts to a read-only view rather than keeping a
-        permanent override, so responsibility doesn't stay ambiguous.
-    """
+    """Who can change a ticket's status, transfer it, or escalate it."""
     if ticket.assigned_staff_id is None:
         return getattr(user, 'role', None) == 'admin'
     if getattr(ticket.assigned_staff, 'role', None) == 'admin':
@@ -238,13 +209,7 @@ def _can_manage_ticket(user, ticket):
 
 
 class TicketEligibleStaffView(APIView):
-    """
-    GET /tickets/<id>/eligible-staff/
-    Returns the staff ids currently tied to this ticket's company (the
-    pool it was originally offered to) — used purely to group the
-    Transfer picker into "Assigned to this customer" vs "Other staff",
-    not to restrict who can actually be transferred to.
-    """
+    """Staff ids tied to this ticket's company, used to group the Transfer picker."""
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request, pk):
@@ -255,14 +220,7 @@ class TicketEligibleStaffView(APIView):
 
 
 class TicketAssignmentHistoryView(generics.ListAPIView):
-    """
-    GET /tickets/<uuid:pk>/assignment-history/
-    Full, permanent, chronological audit trail for one ticket's assignment
-    journey — every offer/accept/decline/transfer/escalate event, each its
-    own immutable row. This is what HolderChip's tooltip on the Ticket
-    Assignment page should read from instead of deriving history from the
-    (mutable, per-staff-collapsed) TicketAssignment rows.
-    """
+    """Full, permanent, chronological audit trail for one ticket's assignment journey."""
     serializer_class = TicketAssignmentEventSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
@@ -272,13 +230,19 @@ class TicketAssignmentHistoryView(generics.ListAPIView):
         ).select_related('staff', 'to_staff')
 
 
+class TicketStatusHistoryView(generics.ListAPIView):
+    """Full, permanent, chronological trail of every status change on this ticket. Admin-only."""
+    serializer_class = TicketStatusHistorySerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get_queryset(self):
+        return TicketStatusHistory.objects.filter(
+            ticket_id=self.kwargs['pk']
+        ).select_related('changed_by')
+
+
 class TicketStatusUpdateView(APIView):
-    """
-    PATCH /tickets/<id>/status/  { status }
-    Lets the assigned staff member (or an admin) move a ticket through
-    In Progress -> On Hold -> Resolved -> Closed. 'Open' is intentionally
-    not a valid target here — see TicketStatusUpdateSerializer.
-    """
+    """Lets the assigned staff member (or admin) move a ticket through its status flow."""
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, pk):
@@ -292,12 +256,18 @@ class TicketStatusUpdateView(APIView):
         serializer.is_valid(raise_exception=True)
 
         previous_status = ticket.status
-        ticket.status = serializer.validated_data['status']
+        new_status = serializer.validated_data['status']
+        remark = serializer.validated_data['remark']
+
+        ticket.status = new_status
         ticket.save(update_fields=['status', 'updated_at'])
 
-        # Only fire on the transition INTO Resolved, not every save while
-        # it's already sitting at Resolved (e.g. no-op PATCHes) or moves
-        # between other statuses.
+        TicketStatusHistory.objects.create(
+            ticket=ticket, from_status=previous_status, to_status=new_status,
+            remark=remark, changed_by=request.user,
+        )
+
+        # Only fire on the transition INTO Resolved.
         if ticket.status == 'Resolved' and previous_status != 'Resolved':
             send_ticket_resolved_email(ticket, request.user)
 
@@ -305,21 +275,7 @@ class TicketStatusUpdateView(APIView):
 
 
 class TransferTicketView(APIView):
-    """
-    POST /tickets/<id>/transfer/  { staff_id }
-    Hands a ticket to another staff member as a fresh PENDING offer — the
-    new staff must explicitly accept it (or decline it) via the same
-    accept/decline endpoints used for regular offers. The ticket is
-    unassigned in the interim (assigned_staff cleared), which is exactly
-    what makes AcceptTicketAssignmentView's existing race-safety logic
-    work unmodified: it only blocks an accept when the ticket already has
-    an assignee, and during a transfer it deliberately doesn't.
-
-    The outgoing staff's TicketAssignment row flips to 'transferred' (with
-    transferred_to set) immediately, so they lose management rights on
-    this ticket right away — only an admin can act on it until the new
-    staff member accepts.
-    """
+    """Hands a ticket to another staff member as a fresh PENDING offer they must accept/decline."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
@@ -359,23 +315,11 @@ class TransferTicketView(APIView):
                 incoming.transferred_to = None
                 incoming.save(update_fields=['status', 'responded_at', 'transferred_to'])
 
-            # Permanent log entry for this hop — recorded regardless of
-            # whether TicketAssignment above created a fresh row or
-            # overwrote an existing one, so the full trail survives even
-            # if this same staff member has held the ticket before.
+            # Permanent log entry for this hop.
             log_assignment_event(ticket, 'transferred', staff=outgoing_staff, to_staff=new_staff)
 
-            # Unassigned until the new staff member accepts — see
-            # AcceptTicketAssignmentView, which only rejects an accept when
-            # ticket.assigned_staff_id is already set.
-            #
-            # NOTE: escalated/escalated_at/escalation_note are deliberately
-            # NOT cleared here. Escalation is kept as permanent history —
-            # the ticket stays listed in the Escalated panel and keeps its
-            # banner/note forever, even after being transferred onward.
-            # What changes is just who currently holds it; the frontend
-            # derives "current status" (e.g. "Transferred to X") from
-            # assigned_staff + the assignment chain, not from `escalated`.
+            # Unassigned until the new staff member accepts.
+            # escalated/escalated_at/escalation_note are kept as permanent history, not cleared.
             ticket.assigned_staff = None
             ticket.save(update_fields=['assigned_staff', 'updated_at'])
 
@@ -383,16 +327,7 @@ class TransferTicketView(APIView):
 
 
 class EscalateTicketView(APIView):
-    """
-    POST /tickets/<id>/escalate/  { reason }
-    Escalating actually hands the ticket to an admin — same handoff
-    mechanics as TransferTicketView (outgoing staff's row flips to
-    'transferred', admin gets an 'accepted' row) — plus it sets the
-    `escalated` flag/note so admins can spot how the ticket got to them.
-    If there are multiple admin accounts, it picks one (the
-    lowest-id active admin) rather than asking the escalating staff
-    member to choose.
-    """
+    """Hands the ticket to an admin (lowest-id active admin) and sets the escalated flag/note."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
@@ -467,12 +402,7 @@ class MyTicketAssignmentsView(generics.ListAPIView):
 
 
 class TicketAssignmentListView(generics.ListAPIView):
-    """GET /ticket-assignments/?status=pending — admin/staff overview of
-    every offer made, across all tickets and staff.
-    GET /ticket-assignments/?escalated=true — same, but filtered to rows
-    whose ticket has been escalated, regardless of the row's own status
-    (an escalated ticket's admin row is 'accepted', not 'pending', so this
-    needs its own filter rather than reusing the status one)."""
+    """Admin/staff overview of every offer made, filterable by status or escalated."""
     serializer_class = TicketAssignmentSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
@@ -506,12 +436,7 @@ class TicketAssignmentPendingCountView(APIView):
 
 
 class AcceptTicketAssignmentView(APIView):
-    """
-    POST /ticket-assignments/<id>/accept/
-    Race-safe: locks the ticket row, and only lets the accept through if no
-    one else has claimed it yet. Every other pending offer for the same
-    ticket is flipped to 'unavailable' in the same transaction.
-    """
+    """Race-safe accept: locks the ticket row, flips other pending offers to 'unavailable'."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, assignment_id):
@@ -544,9 +469,7 @@ class AcceptTicketAssignmentView(APIView):
                 ticket.status = 'In Progress'
             ticket.save(update_fields=['assigned_staff', 'status', 'updated_at'])
 
-            # Captured as a list BEFORE the bulk update below, since
-            # .update() doesn't give per-row access — needed to log each
-            # affected staff member's 'unavailable' event individually.
+            # Captured before the bulk update to log each affected staff member's event.
             other_pending = list(
                 TicketAssignment.objects.filter(
                     ticket=ticket, status='pending'
@@ -587,10 +510,7 @@ class DeclineTicketAssignmentView(APIView):
 # ---------------------------------------------------------------------------
 
 class ProductMasterListCreateView(generics.ListCreateAPIView):
-    """
-    GET  /products/   — admin only. ?include_inactive=true to see disabled products too.
-    POST /products/   — {name, version, activation_date}
-    """
+    """List/create Product Master entries. Admin only."""
     serializer_class = ProductMasterSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
 
@@ -608,13 +528,39 @@ class ProductMasterDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = ProductMaster.objects.all()
 
 
+class ProductStaffMapView(APIView):
+    """Gets/replaces the staff handling each product name (keyed by name, not row id)."""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        mapping = {}
+        for row in StaffProduct.objects.values('product_name', 'staff_id'):
+            mapping.setdefault(row['product_name'], []).append(row['staff_id'])
+        return Response(mapping)
+
+    def post(self, request):
+        product_name = (request.data.get('product_name') or '').strip()
+        if not product_name:
+            return Response({'detail': 'product_name is required.'}, status=400)
+        staff_ids = set(request.data.get('staff_ids') or [])
+
+        existing = set(
+            StaffProduct.objects.filter(product_name=product_name).values_list('staff_id', flat=True)
+        )
+        StaffProduct.objects.filter(
+            product_name=product_name, staff_id__in=existing - staff_ids
+        ).delete()
+        StaffProduct.objects.bulk_create([
+            StaffProduct(staff_id=sid, product_name=product_name) for sid in staff_ids - existing
+        ])
+        return Response({
+            'product_name': product_name,
+            'staff_ids': list(staff_ids),
+        })
+
+
 class PublicProductListView(generics.ListAPIView):
-    """
-    GET /public-products/ — public, unauthenticated, read-only.
-    Used by the customer registration form (Onboarding.jsx) to populate
-    the product picker before the user has an account. Only exposes
-    active products, and only id/name/version — nothing sensitive.
-    """
+    """Public, unauthenticated, read-only product picker for customer registration."""
     serializer_class = PublicProductSerializer
     permission_classes = [AllowAny]
     queryset = ProductMaster.objects.filter(is_active=True)

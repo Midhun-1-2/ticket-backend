@@ -55,19 +55,12 @@ class Ticket(models.Model):
     priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='Medium')
     description = models.TextField()
 
-    # No longer a fixed choices list — validated dynamically against
-    # ProductMaster in TicketSerializer.validate_product instead, so new
-    # products added via Product Master work immediately without a
-    # migration. 'Not Applicable' remains a valid sentinel value even
-    # though it isn't a real ProductMaster row (see validate_product).
-    # max_length matches ProductMaster.name's length so nothing here gets
-    # silently truncated.
+    # Validated dynamically against ProductMaster (see TicketSerializer.validate_product).
     product = models.CharField(max_length=150, blank=True, default='Not Applicable')
 
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='Open')
 
-    # Who raised it — set automatically from the authenticated request,
-    # never accepted directly from client input (see perform_create).
+    # Set automatically from the authenticated request (see perform_create).
     raised_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -76,9 +69,7 @@ class Ticket(models.Model):
         related_name='tickets_raised',
     )
 
-    # Set only once a staff member accepts an offer via TicketAssignment
-    # (see AcceptTicketAssignmentView), or via a transfer
-    # (see TransferTicketView). Null means no one has claimed it yet.
+    # Set once a staff member accepts or is transferred the ticket; null = unclaimed.
     assigned_staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -87,17 +78,12 @@ class Ticket(models.Model):
         related_name='tickets_assigned_to',
     )
 
-    # Escalation — flagged by the assigned staff member for admin
-    # attention. Doesn't reassign the ticket; it stays with the staff
-    # member, this just surfaces it. See EscalateTicketView.
+    # Flagged by assigned staff for admin attention; doesn't reassign the ticket.
     escalated = models.BooleanField(default=False)
     escalated_at = models.DateTimeField(null=True, blank=True)
     escalation_note = models.TextField(blank=True)
 
-    # Set the first time status flips to 'Closed' via TicketStatusUpdateView
-    # / TicketDetailView.perform_update. Cleared if the ticket is ever
-    # reopened (moved to any other status), so this always reflects the
-    # *current* closure, not a historical one.
+    # Set when status flips to 'Closed'; cleared if reopened.
     closed_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -120,35 +106,10 @@ class TicketAttachment(models.Model):
         return self.file.name
 
 
-# ---------------------------------------------------------------------------
-# Ticket Assignment — offer / accept / decline / transfer
-# ---------------------------------------------------------------------------
+# Ticket Assignment — offer / accept / decline / transfer.
 
 class TicketAssignment(models.Model):
-    """
-    One row per (ticket, staff) offer. When a ticket is raised, we create a
-    'pending' row for every staff member currently tied to the customer's
-    company (via authentication.StaffAssignment — primary or per-product).
-    Whoever accepts first wins the ticket; every other pending row for that
-    ticket flips to 'unavailable' in the same transaction (see
-    AcceptTicketAssignmentView), so there's no window where two staff can
-    both successfully claim the same ticket.
-
-    A 'transferred' row is created when a staff member hands the ticket to
-    someone else directly (see TransferTicketView) — the outgoing staff's
-    row flips to 'transferred', and a new 'accepted' row is created for the
-    incoming staff member (no race, since it's a direct handoff rather than
-    a fresh multi-staff offer).
-
-    IMPORTANT: because of the unique_together constraint below, this table
-    holds only the CURRENT status per (ticket, staff) pair — if the same
-    staff member is offered the same ticket again later (e.g. it bounces
-    back to them after going elsewhere), their existing row is reused and
-    overwritten rather than a new one being created. That makes this table
-    unsuitable as a full history log on its own — see TicketAssignmentEvent
-    below for the permanent, append-only version used to show a ticket's
-    complete assignment trail (HolderChip's tooltip on the frontend).
-    """
+    """One row per (ticket, staff) offer; holds only the current status per pair (not a history log)."""
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('accepted', 'Accepted'),
@@ -166,9 +127,7 @@ class TicketAssignment(models.Model):
     offered_at = models.DateTimeField(auto_now_add=True)
     responded_at = models.DateTimeField(null=True, blank=True)
 
-    # Who this ticket was transferred TO, only set on the outgoing staff
-    # member's row when status='transferred'. Lets the "Past offers" list
-    # show "Transferred to <name>" instead of just a bare status label.
+    # Who this ticket was transferred to; set on the outgoing staff member's row.
     transferred_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -188,19 +147,7 @@ class TicketAssignment(models.Model):
 
 
 class TicketAssignmentEvent(models.Model):
-    """
-    Append-only, permanent audit trail of every assignment-related action
-    on a ticket: offered, accepted, declined, lost-the-race (unavailable),
-    transferred, escalated. Every row is a separate, immutable event — this
-    is what makes it possible to show a ticket's FULL journey even when the
-    same staff member is involved more than once (e.g. Godson accepts,
-    it's later transferred to John, then back to Godson again — both of
-    Godson's appearances get their own row here, unlike TicketAssignment
-    above, which would collapse them into one overwritten row).
-
-    Nothing here is ever updated or deleted after creation — only new rows
-    are appended, via log_assignment_event() in views.py.
-    """
+    """Append-only, permanent audit trail of every assignment-related action on a ticket."""
     ACTION_CHOICES = [
         ('offered', 'Offered'),
         ('accepted', 'Accepted'),
@@ -214,10 +161,7 @@ class TicketAssignmentEvent(models.Model):
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='assignment_events')
     action = models.CharField(max_length=15, choices=ACTION_CHOICES)
 
-    # Who this event is primarily about — the staff being offered to, who
-    # accepted/declined, who lost the race, or (for transferred/escalated)
-    # the OUTGOING staff member. Null for a transfer/escalate out of an
-    # unassigned ticket.
+    # Who this event is primarily about (offered/accepted/declined/outgoing staff).
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -243,21 +187,32 @@ class TicketAssignmentEvent(models.Model):
         return f"{self.ticket_id}: {self.action} ({self.staff})"
 
 
-class ProductMaster(models.Model):
-    """Admin-managed product catalog — distinct from authentication.Product,
-    which records what a specific company has purchased/activated. This is
-    the master list of products the ticketing system knows about (feeds the
-    'Product' dropdown on Raise Ticket and Onboarding). Ticket.product is
-    validated against this table dynamically (see TicketSerializer) rather
-    than a fixed choices list.
+class TicketStatusHistory(models.Model):
+    """Permanent, append-only log of every status change on a ticket, with the remark given."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='status_history')
+    from_status = models.CharField(max_length=15, choices=Ticket.STATUS_CHOICES)
+    to_status = models.CharField(max_length=15, choices=Ticket.STATUS_CHOICES)
+    remark = models.TextField()
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ticket_status_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    `name` is no longer globally unique on its own — a single product can
-    have multiple versions, each stored as its own row sharing the same
-    name. (name, version) together must be unique instead, so the same
-    product/version pair can't be entered twice, but "Ticket Desk Pro"
-    v1.0 and v2.0 can coexist as separate rows. See ProductMasterPage.jsx's
-    "Add New Version" action, which POSTs a new row rather than PATCHing
-    an existing one."""
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name_plural = "Ticket status histories"
+
+    def __str__(self):
+        return f"{self.ticket_id}: {self.from_status} -> {self.to_status}"
+
+
+class ProductMaster(models.Model):
+    """Admin-managed product catalog; (name, version) pairs must be unique."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=150)

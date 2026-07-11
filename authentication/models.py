@@ -14,13 +14,7 @@ phone_validator = RegexValidator(
 )
 
 
-# ---------------------------------------------------------------------------
-# Staff roles / designations (e.g. "Support Agent", "Team Lead") — separate
-# from CustomUser.role (customer/staff/admin, the account TYPE). This is the
-# job title shown in the Staff Management UI's "Role" column and the
-# "Add Role/Designation" modal.
-# ---------------------------------------------------------------------------
-
+# Staff job title/designation (separate from CustomUser.role, the account type).
 class StaffRole(models.Model):
     name = models.CharField(max_length=100, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,16 +27,7 @@ class StaffRole(models.Model):
         return self.name
 
 
-# ---------------------------------------------------------------------------
-# Staff departments (e.g. "Technical", "Account") — same pattern as
-# StaffRole above, just for CustomUser.department. That field stays a
-# plain CharField (not a FK) to avoid migrating existing string values;
-# this table exists purely to back the "Add Department" modal and to let
-# StaffCreateSerializer/StaffUpdateSerializer validate that a department
-# name actually exists before accepting it, the same way validate_role
-# already does against StaffRole.
-# ---------------------------------------------------------------------------
-
+# Staff department names, used to validate CustomUser.department values.
 class StaffDepartment(models.Model):
     name = models.CharField(max_length=100, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -105,7 +90,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(blank=True)
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.CUSTOMER)
 
-    # Populated for Role.STAFF accounts only (created via Staff Management).
+    # Staff-only field.
     department = models.CharField(max_length=50, blank=True)
     designation = models.ForeignKey(
         StaffRole,
@@ -114,15 +99,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name="staff_members",
     )
-    # NOTE: this stored counter is no longer read anywhere — StaffListSerializer
-    # now computes ticketsAssigned live from Ticket.objects.filter(assigned_staff=...)
-    # instead (see StaffListSerializer.get_ticketsAssigned in serializers.py),
-    # since a real Ticket model exists now. Left on the model rather than
-    # removed outright to avoid a migration that drops a column something
-    # else might still reference; safe to drop later once confirmed unused.
+    # Deprecated/unused counter, kept to avoid a column-dropping migration.
     tickets_assigned = models.PositiveIntegerField(default=0)
 
-    # Approval workflow (Admin approves new accounts before login is allowed)
+    # Admin must approve new accounts before login is allowed.
     is_approved = models.BooleanField(default=False)
 
     is_active = models.BooleanField(default=True)
@@ -142,9 +122,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
 
 class Mpin(models.Model):
-    """Separate from the account password. Created the first time a user
-    logs in with their password; used as a quick-login alternative
-    afterward."""
+    """Quick-login PIN, separate from the account password."""
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -169,16 +147,7 @@ class Mpin(models.Model):
 
 
 class EmailOTP(models.Model):
-    """Short-lived OTP sent to a user's registered email. Two purposes so
-    far:
-      - mpin_change: authenticated flow from the Profile page's
-        "Change M-PIN" button.
-      - mpin_forgot: UNauthenticated flow from the login screen's
-        "Forgot M-PIN?" link — identity is proven purely via the OTP
-        landing in the account's registered inbox, since the whole point
-        is the person doesn't have a working M-PIN (or password) handy.
-    Both share this same model/table; only `purpose` and which view
-    creates/consumes the row differ."""
+    """Short-lived OTP sent to a user's registered email, for M-PIN change or forgot-M-PIN flows."""
 
     PURPOSE_MPIN_CHANGE = "mpin_change"
     PURPOSE_MPIN_FORGOT = "mpin_forgot"
@@ -214,10 +183,7 @@ class EmailOTP(models.Model):
         return f"OTP({self.purpose}) for {self.user}"
 
 
-# ---------------------------------------------------------------------------
-# Onboarding (company signup) — Company & Product
-# ---------------------------------------------------------------------------
-
+# Onboarding (company signup) — Company & Product.
 class Company(models.Model):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
@@ -284,15 +250,7 @@ class Company(models.Model):
     products_in_use = models.JSONField(default=list, blank=True)
     contract_ref_number = models.CharField(max_length=50, blank=True)
 
-    # ---------------------------------------------------------------------
-    # Account Approvals review workflow — Step B (Product Verification)
-    # persistence. Keyed by product name so it lines up directly with
-    # `products_in_use` (a plain list of name strings, not FK'd Product
-    # rows), e.g.:
-    #   {"Ticket Desk Pro": "Verified", "Billing Suite": "Needs Clarification"}
-    # A single free-text note covers the whole registration rather than
-    # per-product, matching how the frontend's Step B form is laid out.
-    # ---------------------------------------------------------------------
+    # Account Approvals Step B (Product Verification) status, keyed by product name.
     product_verification = models.JSONField(default=dict, blank=True)
     verification_note = models.TextField(blank=True)
 
@@ -335,12 +293,8 @@ class Product(models.Model):
 
     def __str__(self):
         return f"{self.product_name} ({self.company.company_name})"
-    
-# ---------------------------------------------------------------------------
-# Staff assignment history — created when an admin confirms staff assignment
-# during Account Approvals (Step C). History is kept: reassigning doesn't
-# delete old rows, it marks them is_current=False and inserts new ones.
-# ---------------------------------------------------------------------------
+
+# Staff assignment history — reassigning marks old rows is_current=False rather than deleting.
 
 class StaffAssignment(models.Model):
     company = models.ForeignKey(
@@ -349,8 +303,7 @@ class StaffAssignment(models.Model):
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="customer_assignments"
     )
-    # Empty string = "primary staff for the whole company" (assignMode="primary").
-    # A product name = "staff for this specific product" (assignMode="per-product").
+    # Empty = primary staff for the whole company; a product name = scoped to that product.
     product_name = models.CharField(max_length=100, blank=True)
 
     is_current = models.BooleanField(default=True)
@@ -370,3 +323,21 @@ class StaffAssignment(models.Model):
     def __str__(self):
         target = self.product_name or "all products"
         return f"{self.staff} ← {self.company} ({target})"
+
+
+class StaffProduct(models.Model):
+    """Which products a staff member can handle, globally (independent of company)."""
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="staff_products"
+    )
+    product_name = models.CharField(max_length=100)
+    # Specific version handled; blank = all versions.
+    version = models.CharField(max_length=30, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "staff_products"
+        unique_together = [("staff", "product_name", "version")]
+
+    def __str__(self):
+        return f"{self.staff} → {self.product_name} ({self.version or 'any version'})"

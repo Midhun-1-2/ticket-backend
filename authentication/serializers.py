@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Company, Product
-from .models import StaffRole, StaffDepartment
+from .models import StaffRole, StaffDepartment, StaffProduct
 from ticketapp.models import Ticket
 
 User = get_user_model()
@@ -68,13 +68,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
 
 class CompanyDraftSerializer(serializers.ModelSerializer):
-    """Every field is optional — used while the user is still filling the
-    form and clicks 'Save as Draft'.
-
-    NOTE: the frontend no longer exposes a 'Save as Draft' button, but this
-    endpoint is left in place in case you want to bring drafts back later
-    (e.g. auto-save). It's unused by the current Onboarding.jsx.
-    """
+    """Every field optional — used for the 'Save as Draft' onboarding step."""
     products = ProductSerializer(many=True, required=False)
     draft_token = serializers.UUIDField(required=False)
 
@@ -133,6 +127,10 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
     draft_token = serializers.UUIDField(required=False)
 
     company_name = serializers.CharField(max_length=200)
+    # Optional — the customer can supply their own reference code. Left
+    # blank means blank: OnboardingSubmitView stores None rather than
+    # generating one.
+    company_code = serializers.CharField(max_length=30, required=False, allow_blank=True)
     company_type = serializers.ChoiceField(choices=Company.CompanyType.choices)
     address_line1 = serializers.CharField(max_length=255)
     city = serializers.CharField(max_length=100)
@@ -153,7 +151,7 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
         model = Company
         fields = [
             "draft_token",
-            "company_name", "company_type", "gst_number", "pan_number", "website",
+            "company_name", "company_code", "company_type", "gst_number", "pan_number", "website",
             "industry_type", "annual_turnover", "employee_count",
             "address_line1", "address_line2", "city", "state", "country", "pincode",
             "contact_name", "designation", "email", "mobile_number", "phone_number",
@@ -162,6 +160,20 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
             "preferred_time", "remarks", "products_in_use", "contract_ref_number",
             "products", "password", "confirm_password",
         ]
+
+    def validate_company_code(self, value):
+        value = value.strip()
+        if not value:
+            return value
+        qs = Company.objects.filter(company_code__iexact=value)
+        draft_token = self.initial_data.get("draft_token")
+        if draft_token:
+            qs = qs.exclude(draft_token=draft_token)
+        if qs.exists():
+            raise serializers.ValidationError(
+                "This company code is already in use. Please choose another."
+            )
+        return value
 
     def validate_mobile_number(self, value):
         if not value.isdigit() or len(value) != 10:
@@ -251,12 +263,7 @@ class ProductVerificationSerializer(serializers.Serializer):
 
 
 class StaffAssignmentSaveSerializer(serializers.Serializer):
-    """Accepts either:
-      { mode: "primary", primary_staff_ids: [5, 8] }
-    or
-      { mode: "per-product", per_product: {"Ticket Desk Pro": [5, 8], "Billing Suite": [3]} }
-    Multiple staff can be assigned to the same target — no single "main" contact.
-    """
+    """Accepts either a "primary" staff list or a "per-product" staff mapping."""
     mode = serializers.ChoiceField(choices=["primary", "per-product"])
     primary_staff_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False, allow_empty=False
@@ -311,12 +318,19 @@ class StaffListSerializer(serializers.ModelSerializer):
     ticketsAssigned = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     assignedCustomers = serializers.SerializerMethodField()
+    products = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "name", "email", "phone", "department", "role",
-            "ticketsAssigned", "status", "assignedCustomers",
+            "ticketsAssigned", "status", "assignedCustomers", "products",
+        ]
+
+    def get_products(self, obj):
+        return [
+            {"name": row["product_name"], "version": row["version"]}
+            for row in obj.staff_products.values("product_name", "version")
         ]
 
     def get_role(self, obj):
@@ -349,12 +363,7 @@ class StaffAssignedCustomerSerializer(serializers.Serializer):
 
 
 class StaffAssignedTicketSerializer(serializers.ModelSerializer):
-    """Used by the Staff Management detail slide-over — lists the tickets
-    currently assigned to a given staff member (Ticket.assigned_staff).
-    Sibling of StaffAssignedCustomerSerializer above, just sourced from
-    Ticket instead of StaffAssignment. Includes customer_name since this
-    view isn't scoped to a single customer the way CustomerTicketSerializer
-    (below) is."""
+    """Tickets currently assigned to a given staff member, for the Staff Management detail view."""
     category = serializers.CharField(source='category.name', default='—')
     customer_name = serializers.CharField(
         source='raised_by.full_name', default='', allow_null=True
@@ -368,6 +377,14 @@ class StaffAssignedTicketSerializer(serializers.ModelSerializer):
         ]
 
 
+class StaffProductInputSerializer(serializers.Serializer):
+    """One "product handled" entry — a product name plus, optionally, the
+    specific version this staff member supports. Blank version = versionless
+    / any version (matches a ProductMaster row with no version set)."""
+    name = serializers.CharField(max_length=100)
+    version = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
+
+
 class StaffCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=150)
     email = serializers.EmailField()
@@ -375,6 +392,7 @@ class StaffCreateSerializer(serializers.Serializer):
     department = serializers.CharField(max_length=50)
     role = serializers.CharField(max_length=100)
     password = serializers.CharField(min_length=4)
+    products = StaffProductInputSerializer(many=True, required=False, default=list)
 
     def validate_phone(self, value):
         if not value.isdigit():
@@ -395,7 +413,7 @@ class StaffCreateSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         designation = StaffRole.objects.get(name=validated_data["role"])
-        return User.objects.create_user(
+        user = User.objects.create_user(
             phone_number=validated_data["phone"],
             password=validated_data["password"],
             full_name=validated_data["name"],
@@ -405,6 +423,11 @@ class StaffCreateSerializer(serializers.Serializer):
             role=User.Role.STAFF,
             is_approved=True,
         )
+        StaffProduct.objects.bulk_create([
+            StaffProduct(staff=user, product_name=p["name"], version=p.get("version", ""))
+            for p in validated_data.get("products", [])
+        ])
+        return user
 
 
 class StaffUpdateSerializer(serializers.Serializer):
@@ -414,6 +437,7 @@ class StaffUpdateSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=10, min_length=10, required=False)
     department = serializers.CharField(max_length=50, required=False)
     role = serializers.CharField(max_length=100, required=False)
+    products = StaffProductInputSerializer(many=True, required=False)
 
     def validate_phone(self, value):
         if not value.isdigit():
@@ -444,6 +468,15 @@ class StaffUpdateSerializer(serializers.Serializer):
         if "role" in validated_data:
             instance.designation = StaffRole.objects.get(name=validated_data["role"])
         instance.save()
+        if "products" in validated_data:
+            wanted = {(p["name"], p.get("version", "") or "") for p in validated_data["products"]}
+            existing = set(instance.staff_products.values_list("product_name", "version"))
+            for name, version in existing - wanted:
+                StaffProduct.objects.filter(staff=instance, product_name=name, version=version).delete()
+            StaffProduct.objects.bulk_create([
+                StaffProduct(staff=instance, product_name=name, version=version)
+                for name, version in wanted - existing
+            ])
         return instance
 
 
@@ -461,9 +494,7 @@ def _customer_status(user):
 
 
 def _customer_email(user):
-    """The account's own email is often blank — onboarding stores the
-    contact email on Company.email instead. Fall back to that so the UI
-    always shows the email the customer actually entered."""
+    """Falls back to Company.email if the account's own email is blank."""
     if user.email:
         return user.email
     company = getattr(user, "company", None)
@@ -607,11 +638,7 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
 
 
 class CustomerAddProductSerializer(serializers.Serializer):
-    """POST body for CustomerAddProductView — admin picks a Product Master
-    catalog entry (ticketapp.ProductMaster) and it's added to the
-    customer's company as a new Product row. Only product_id is accepted;
-    name/version are copied server-side from the catalog entry so the
-    two stay in sync."""
+    """POST body for CustomerAddProductView — adds a Product Master catalog entry to a company."""
     product_id = serializers.UUIDField()
 
     def validate_product_id(self, value):
@@ -621,11 +648,7 @@ class CustomerAddProductSerializer(serializers.Serializer):
         return value
     
 class ProfileSerializer(serializers.ModelSerializer):
-    """Read/update shape for the logged-in user's own profile page.
-    Phone number is intentionally excluded from edits — it's the login
-    identifier (USERNAME_FIELD), so changing it here would need token
-    re-issuance / uniqueness handling mid-session. Keep it read-only for
-    now; can revisit as its own dedicated flow later if needed."""
+    """Read/update shape for the logged-in user's own profile page (phone number is read-only)."""
     department_name = serializers.CharField(source="department", read_only=True)
     designation_name = serializers.SerializerMethodField()
     has_mpin = serializers.SerializerMethodField()

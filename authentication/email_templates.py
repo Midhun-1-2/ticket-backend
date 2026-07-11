@@ -1,41 +1,10 @@
-"""
-HTML email templates for Ticket Desk's transactional mail.
-
-Email clients don't reliably support external stylesheets, CSS variables,
-or web fonts, so none of this can literally reuse style.css — everything
-here is inlined and uses table-based layout for compatibility (Outlook
-especially needs tables, not flexbox/grid). The colors below are copied
-directly from style.css's :root tokens so the email still reads as "the
-same product":
-  --ink:      #14171F
-  --accent:   #0F6E63
-  --accent-ink: #0B4F47
-  --accent-soft: #E3F1EE
-  --paper:    #F7F6F3
-  --text:     #1C1E22
-  --text-muted: #6E6B62
-  --text-faint: #A6A297
-  --line:     #E5E2DA
-  --amber:    #C8791A
-  --amber-soft: #FBEEDD
-  --red:      #C4432E
-  --red-soft: #FAE6E1
-
-Every email type (OTP, ticket raised/resolved, registration received,
-account approved, registration rejected) shares the same header and
-footer via _wrap_email() below, so adding a new email type is just:
-write the body content, call _wrap_email().
-"""
+"""HTML email templates for Ticket Desk's transactional mail (inlined, table-based layout)."""
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 
 
-# ---------------------------------------------------------------------------
-# Shared shell — header (TD mark + brand) / footer, identical across every
-# email type. Individual builders below only need to supply the body.
-# ---------------------------------------------------------------------------
-
+# Shared shell — header/footer used by every email type.
 def _wrap_email(eyebrow, title, body_html):
     return f"""<!DOCTYPE html>
 <html>
@@ -97,11 +66,7 @@ def _paragraph(text):
 
 
 def _details_card(rows, accent_bg="#E3F1EE", label_color="#0B4F47", border_color="rgba(15,110,99,0.15)"):
-    """rows: list of (label, value) tuples, rendered as a light card of
-    key/value lines — used by ticket/registration/approval emails the
-    same way the OTP box is used for the code itself. accent_bg/
-    label_color/border_color can be swapped to a warmer/redder tone for
-    negative-outcome emails (e.g. rejection)."""
+    """Renders a light card of label/value rows."""
     row_html = ""
     for label, value in rows:
         row_html += f"""
@@ -122,13 +87,8 @@ def _details_card(rows, accent_bg="#E3F1EE", label_color="#0B4F47", border_color
 
 
 def _text_block(label, text):
-    """Free-text content that doesn't fit a single-line details row (e.g.
-    a ticket description) — a plain bordered box, mirroring style.css's
-    .remarks-box treatment rather than the colored details card, since
-    this is quoting the customer's own words back to them rather than
-    presenting structured metadata."""
-    # Preserve line breaks the customer typed, since email HTML collapses
-    # plain newlines otherwise.
+    """Free-text content in a plain bordered box (e.g. a ticket description)."""
+    # Preserve line breaks, since email HTML collapses plain newlines.
     safe_text = (text or "").replace("\n", "<br>")
     return f"""
     <div style="margin-bottom:20px;">
@@ -161,9 +121,7 @@ def _footnote(text):
     return f"""<p style="color:#6E6B62;font-size:12.5px;line-height:1.6;font-family:'Segoe UI',Helvetica,Arial,sans-serif;margin:0;">{text}</p>"""
 
 
-# ---------------------------------------------------------------------------
-# OTP emails — M-PIN change (authenticated) and M-PIN forgot (unauthenticated)
-# ---------------------------------------------------------------------------
+# OTP emails — M-PIN change and M-PIN forgot flows.
 
 def build_otp_email_html(display_name, otp, title, intro_text):
     body = _paragraph(f"Hi {display_name},<br><br>{intro_text}") + _otp_box(otp) + _footnote(
@@ -185,9 +143,7 @@ def build_otp_email_text(display_name, otp, title, intro_text):
     )
 
 
-# ---------------------------------------------------------------------------
-# Ticket raised — sent to the customer right after they submit a ticket
-# ---------------------------------------------------------------------------
+# Ticket raised — sent to the customer right after they submit a ticket.
 
 def build_ticket_raised_email_html(customer_name, ticket_id, subject, category, priority, product, description):
     intro = "Thanks for reaching out — we've received your ticket and a member of our team will pick it up shortly."
@@ -230,10 +186,7 @@ def build_ticket_raised_email_text(customer_name, ticket_id, subject, category, 
     )
 
 
-# ---------------------------------------------------------------------------
-# Ticket resolved — sent to the customer when a staff member (or admin)
-# marks their ticket Resolved
-# ---------------------------------------------------------------------------
+# Ticket resolved — sent to the customer when their ticket is marked Resolved.
 
 def build_ticket_resolved_email_html(customer_name, ticket_id, subject, resolved_by_name):
     intro = "Good news — your ticket has been marked as resolved."
@@ -263,10 +216,7 @@ def build_ticket_resolved_email_text(customer_name, ticket_id, subject, resolved
     )
 
 
-# ---------------------------------------------------------------------------
-# Registration received — sent right after onboarding submit, before any
-# admin review has happened
-# ---------------------------------------------------------------------------
+# Registration received — sent right after onboarding submit.
 
 def build_registration_received_email_html(contact_name, company_name, company_code):
     intro = f"Thanks for registering <strong>{company_name}</strong> with Ticket Desk. Your registration is now under review."
@@ -294,10 +244,7 @@ def build_registration_received_email_text(contact_name, company_name, company_c
     )
 
 
-# ---------------------------------------------------------------------------
-# Account approved — doubles as the "welcome" / greeting email, since this
-# is the moment the customer actually gets access
-# ---------------------------------------------------------------------------
+# Account approved — welcome email once a company is approved.
 
 def build_approval_email_html(contact_name, company_name, phone_number):
     intro = f"Good news — <strong>{company_name}</strong> has been approved. Welcome to Ticket Desk!"
@@ -326,10 +273,7 @@ def build_approval_email_text(contact_name, company_name, phone_number):
     )
 
 
-# ---------------------------------------------------------------------------
-# Registration rejected — uses the red/amber palette instead of teal, since
-# this is a negative-outcome email
-# ---------------------------------------------------------------------------
+# Registration rejected — negative-outcome email, uses red/amber palette.
 
 def build_rejection_email_html(contact_name, company_name, reason=""):
     intro = f"We're unable to approve the registration for <strong>{company_name}</strong> at this time."
@@ -360,11 +304,7 @@ def build_rejection_email_text(contact_name, company_name, reason=""):
     )
 
 
-# ---------------------------------------------------------------------------
-# Shared sender — used by every branded email above. Centralised here so
-# every email type reuses the same EmailMultiAlternatives call instead of
-# re-implementing it per function.
-# ---------------------------------------------------------------------------
+# Shared sender used by every branded email above.
 
 def send_branded_email(to_email, subject, text_body, html_body):
     email = EmailMultiAlternatives(

@@ -1,8 +1,5 @@
 import secrets
 import string
-import uuid
-
-from django.utils import timezone
 
 from .email_templates import (
     build_registration_received_email_html,
@@ -15,17 +12,8 @@ from .email_templates import (
 )
 
 
-def generate_company_code():
-    """e.g. CMP-2026-4F9A2B"""
-    year = timezone.now().year
-    suffix = uuid.uuid4().hex[:6].upper()
-    return f"CMP-{year}-{suffix}"
-
-
 def generate_temp_password(length=10):
-    """Kept for reference / possible future use (e.g. admin-initiated
-    password resets). No longer used in the onboarding approval flow now
-    that customers set their own password at signup."""
+    """Generates a random temporary password."""
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
@@ -45,8 +33,7 @@ def send_registration_received_email(company):
             company.email, "We've got your registration", text_body, html_body
         )
     except Exception:
-        # Registration must succeed even if the mail server is down —
-        # same fail-silently reasoning as ticketapp's email helpers.
+        # Fail silently — registration must succeed even if mail fails.
         pass
 
 

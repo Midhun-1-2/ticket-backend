@@ -34,13 +34,7 @@ class StaffRoleAdmin(admin.ModelAdmin):
 
 @admin.register(StaffAssignment)
 class StaffAssignmentAdmin(admin.ModelAdmin):
-    """
-    Lets you see/debug which staff member is tied to which company (and
-    whether it's a primary assignment or scoped to one product) without
-    needing to query the DB directly — handy while wiring up
-    TicketAssignment's offer_ticket_to_eligible_staff(), since that
-    function reads straight from this table.
-    """
+    """Admin view of which staff member is assigned to which company/product."""
     list_display = ("staff", "company", "product_name", "is_current", "assigned_at", "assigned_by")
     list_filter = ("is_current", "product_name")
     search_fields = ("staff__full_name", "staff__phone_number", "company__company_name")

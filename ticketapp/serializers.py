@@ -1,12 +1,12 @@
 from rest_framework import serializers
-from .models import Category, Ticket, TicketAttachment, TicketAssignment, TicketAssignmentEvent, ProductMaster
+from .models import (
+    Category, Ticket, TicketAttachment, TicketAssignment, TicketAssignmentEvent,
+    TicketStatusHistory, ProductMaster,
+)
 
 
 class CategorySerializer(serializers.ModelSerializer):
-    # Tells the frontend whether this category is referenced by any ticket,
-    # so the delete button can be locked instead of letting the request
-    # round-trip into a 409 (the FK is PROTECT, so a hard delete would fail
-    # anyway if this were ever out of sync).
+    # Whether this category is referenced by any ticket (locks the delete button).
     in_use = serializers.SerializerMethodField()
 
     class Meta:
@@ -41,20 +41,14 @@ class TicketAttachmentSerializer(serializers.ModelSerializer):
 
 
 class RaisedBySerializer(serializers.Serializer):
-    """Minimal read-only view of the user who raised the ticket. Also
-    reused for assigned_staff below since CustomUser has the same three
-    fields for staff accounts."""
+    """Minimal read-only view of the user who raised the ticket (also used for assigned_staff)."""
     phone_number = serializers.CharField()
     full_name = serializers.CharField()
     role = serializers.CharField()
 
 
 def _customer_allowed_products(user):
-    """Products a customer is allowed to raise tickets against — mirrors
-    authentication.views.MyProductsView exactly (same company-approved +
-    per-product 'Verified' check), duplicated here rather than imported to
-    avoid a ticketapp -> authentication.views circular import. If either
-    file's logic changes, keep both in sync."""
+    """Products a customer is allowed to raise tickets against (mirrors MyProductsView)."""
     company = getattr(user, 'company', None)
     if not company or company.status != 'approved':
         return []
@@ -66,9 +60,7 @@ def _customer_allowed_products(user):
 
 
 class TicketSerializer(serializers.ModelSerializer):
-    # Frontend's category dropdown sends the category NAME as the value
-    # (see <option value={c.name}>), so this matches on name rather than id
-    # — no frontend changes needed. Only active categories are selectable.
+    # Matches on category name (not id) since that's what the frontend sends.
     category = serializers.SlugRelatedField(
         slug_field='name',
         queryset=Category.objects.filter(is_active=True),
@@ -76,6 +68,8 @@ class TicketSerializer(serializers.ModelSerializer):
     attachments = TicketAttachmentSerializer(many=True, read_only=True)
     raised_by = RaisedBySerializer(read_only=True)
     assigned_staff = RaisedBySerializer(read_only=True)
+    # Latest status-change remark, visible to everyone (distinct from the admin-only full history).
+    current_remark = serializers.SerializerMethodField()
 
     class Meta:
         model = Ticket
@@ -83,13 +77,17 @@ class TicketSerializer(serializers.ModelSerializer):
             'id', 'subject', 'category', 'priority', 'description', 'product',
             'status', 'raised_by', 'assigned_staff', 'attachments',
             'escalated', 'escalated_at', 'escalation_note', 'closed_at',
-            'created_at', 'updated_at',
+            'current_remark', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'status', 'raised_by', 'assigned_staff',
             'escalated', 'escalated_at', 'escalation_note', 'closed_at',
-            'created_at', 'updated_at',
+            'current_remark', 'created_at', 'updated_at',
         ]
+
+    def get_current_remark(self, obj):
+        latest = obj.status_history.first()  # ordering = ['-created_at']
+        return latest.remark if latest else ''
 
     def validate_subject(self, value):
         value = value.strip()
@@ -98,9 +96,7 @@ class TicketSerializer(serializers.ModelSerializer):
         return value
 
     def validate_product(self, value):
-        # 'Not Applicable' is always allowed — it isn't a real
-        # ProductMaster row or a company product, just the "no product"
-        # sentinel.
+        # 'Not Applicable' is always allowed — the "no product" sentinel.
         if not value or value == 'Not Applicable':
             return value or 'Not Applicable'
 
@@ -108,12 +104,7 @@ class TicketSerializer(serializers.ModelSerializer):
         user = getattr(request, 'user', None)
 
         if user is not None and getattr(user, 'role', None) == 'customer':
-            # Customers can only raise tickets against products their own
-            # company has on file AND that an admin has verified — the
-            # exact same list Raise Ticket's dropdown is built from (see
-            # /my-products/). This is what actually stops "Projo" (or any
-            # product not tied to the customer's account) from being
-            # submitted, even if the request bypasses the frontend.
+            # Customers can only raise tickets for products verified on their account.
             allowed = _customer_allowed_products(user)
             if value not in allowed:
                 raise serializers.ValidationError(
@@ -122,9 +113,7 @@ class TicketSerializer(serializers.ModelSerializer):
                 )
             return value
 
-        # Staff/admin aren't tied to one company — fall back to the full
-        # active Product Master catalog (they may be raising or editing a
-        # ticket on a customer's behalf).
+        # Staff/admin fall back to the full active Product Master catalog.
         if not ProductMaster.objects.filter(name=value, is_active=True).exists():
             raise serializers.ValidationError(
                 "This product isn't in the current product catalog."
@@ -133,13 +122,17 @@ class TicketSerializer(serializers.ModelSerializer):
 
 
 class TicketStatusUpdateSerializer(serializers.Serializer):
-    """POST/PATCH body for TicketStatusUpdateView — just the new status.
-    'Open' is deliberately excluded: that's the system's initial state
-    before anyone accepts it, not something a staff member should be able
-    to set once they own the ticket."""
+    """POST/PATCH body for TicketStatusUpdateView — new status plus a compulsory remark."""
     STAFF_SETTABLE_STATUSES = ['In Progress', 'On Hold', 'Resolved', 'Closed']
 
     status = serializers.ChoiceField(choices=STAFF_SETTABLE_STATUSES)
+    remark = serializers.CharField()
+
+    def validate_remark(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("A remark is required when changing the status.")
+        return value
 
 
 class TransferTicketSerializer(serializers.Serializer):
@@ -158,9 +151,7 @@ class EscalateTicketSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 
 class TicketAssignmentTicketSerializer(serializers.ModelSerializer):
-    """Compact ticket summary for assignment rows — avoids nesting the full
-    TicketSerializer (attachments, description, etc.) which this screen
-    doesn't need."""
+    """Compact ticket summary for assignment rows (avoids nesting the full TicketSerializer)."""
     category = serializers.CharField(source='category.name', read_only=True)
     customer_name = serializers.CharField(source='raised_by.full_name', read_only=True, default='')
     company_name = serializers.SerializerMethodField()
@@ -197,10 +188,7 @@ class TicketAssignmentSerializer(serializers.ModelSerializer):
 
 
 class TicketAssignmentEventSerializer(serializers.ModelSerializer):
-    """Full permanent audit trail row — see TicketAssignmentEvent's
-    docstring in models.py for why this exists separately from
-    TicketAssignmentSerializer above (that one only reflects CURRENT
-    per-staff status; this one never overwrites anything)."""
+    """Full permanent audit trail row for a ticket assignment event."""
     staff = RaisedBySerializer(read_only=True)
     to_staff = RaisedBySerializer(read_only=True)
 
@@ -210,27 +198,23 @@ class TicketAssignmentEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class TicketStatusHistorySerializer(serializers.ModelSerializer):
+    """Admin-only full status-change trail for one ticket."""
+    changed_by = RaisedBySerializer(read_only=True)
+
+    class Meta:
+        model = TicketStatusHistory
+        fields = ['id', 'from_status', 'to_status', 'remark', 'changed_by', 'created_at']
+        read_only_fields = fields
+
+
 # ---------------------------------------------------------------------------
 # Product Master
 # ---------------------------------------------------------------------------
 
 def _product_in_use(product):
-    """A specific product ROW (name + version) is 'in use' if a company's
-    onboarding record lists exactly that name+version as a purchased
-    product. This is checked per-version, not per-name, so adding a new,
-    unused version of an already-in-use product doesn't inherit the lock
-    from its sibling versions — only the specific version a company
-    actually has on file is protected.
-
-    Ticket.product is deliberately NOT part of this check. Tickets only
-    ever store a plain product NAME (see MyProductsView / Ticket.product),
-    with no version field of their own — there's no way to know which
-    version a given ticket was actually raised against. Including it here
-    would make every version of a product permanently undeletable the
-    moment any ticket exists for that name at all, which defeats the
-    point of having separate, individually-removable versions.
-    """
-    from authentication.models import Product as CompanyProduct  # local import avoids circular import at module load time
+    """Whether a specific product (name + version) is purchased by any company."""
+    from authentication.models import Product as CompanyProduct  # avoids circular import
 
     return CompanyProduct.objects.filter(
         product_name=product.name,
@@ -239,8 +223,7 @@ def _product_in_use(product):
 
 
 class ProductMasterSerializer(serializers.ModelSerializer):
-    # Lets the frontend lock the delete button instead of round-tripping
-    # into a 409 — same pattern as CategorySerializer.in_use.
+    # Lets the frontend lock the delete button — same pattern as CategorySerializer.in_use.
     in_use = serializers.SerializerMethodField()
 
     class Meta:
@@ -252,10 +235,7 @@ class ProductMasterSerializer(serializers.ModelSerializer):
         return _product_in_use(obj)
 
     def validate(self, attrs):
-        # (name, version) must be unique together now, not name alone —
-        # a product can have multiple versions, each its own row (see
-        # ProductMaster.Meta.constraints). Falls back to instance values
-        # for whichever field isn't present in a partial (PATCH) update.
+        # (name, version) must be unique together; falls back to instance values on PATCH.
         name = attrs.get('name', getattr(self.instance, 'name', None))
         version = attrs.get('version', getattr(self.instance, 'version', ''))
         if name:
@@ -276,9 +256,7 @@ class ProductMasterSerializer(serializers.ModelSerializer):
 
 
 class PublicProductSerializer(serializers.ModelSerializer):
-    """Minimal, public-safe shape — used by customer registration
-    (Onboarding.jsx) before the user has an account. Exposes only what's
-    needed to populate a product picker."""
+    """Minimal, public-safe shape used by customer registration to populate a product picker."""
     class Meta:
         model = ProductMaster
         fields = ['id', 'name', 'version']

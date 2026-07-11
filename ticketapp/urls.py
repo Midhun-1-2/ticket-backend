@@ -5,6 +5,7 @@ from .views import (
     TicketListCreateView,
     TicketDetailView,
     TicketStatusUpdateView,
+    TicketStatusHistoryView,
     TransferTicketView,
     EscalateTicketView,
     TicketEligibleStaffView,
@@ -15,6 +16,7 @@ from .views import (
     DeclineTicketAssignmentView,
     ProductMasterListCreateView,
     ProductMasterDetailView,
+    ProductStaffMapView,
     PublicProductListView,
     TicketAssignmentHistoryView,
 )
@@ -26,6 +28,7 @@ urlpatterns = [
     path('tickets/', TicketListCreateView.as_view(), name='ticket-list-create'),
     path('tickets/<uuid:pk>/', TicketDetailView.as_view(), name='ticket-detail'),
     path('tickets/<uuid:pk>/status/', TicketStatusUpdateView.as_view(), name='ticket-status-update'),
+    path('tickets/<uuid:pk>/status-history/', TicketStatusHistoryView.as_view(), name='ticket-status-history'),
     path('tickets/<uuid:pk>/transfer/', TransferTicketView.as_view(), name='ticket-transfer'),
     path('tickets/<uuid:pk>/escalate/', EscalateTicketView.as_view(), name='ticket-escalate'),
     path('tickets/<uuid:pk>/eligible-staff/', TicketEligibleStaffView.as_view(), name='ticket-eligible-staff'),
@@ -37,6 +40,7 @@ urlpatterns = [
     path('ticket-assignments/<uuid:assignment_id>/decline/', DeclineTicketAssignmentView.as_view(), name='ticket-assignment-decline'),
 
     path('products/', ProductMasterListCreateView.as_view(), name='product-list-create'),
+    path('products/staff-map/', ProductStaffMapView.as_view(), name='product-staff-map'),
     path('products/<uuid:pk>/', ProductMasterDetailView.as_view(), name='product-detail'),
 
     path('public-products/', PublicProductListView.as_view(), name='public-product-list'),

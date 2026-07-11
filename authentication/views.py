@@ -46,7 +46,6 @@ from .serializers import (
     ForgotMpinResetSerializer,
 )
 from .utils import (
-    generate_company_code,
     send_approval_email,
     send_registration_received_email,
     send_rejection_email,
@@ -68,9 +67,7 @@ def issue_tokens(user):
 
 
 def send_otp_email(user, otp, title, intro_text):
-    """Shared by RequestMpinChangeOtpView and RequestForgotMpinOtpView —
-    sends the branded HTML OTP email (see authentication/email_templates.py)
-    with a plain-text fallback for clients that don't render HTML."""
+    """Sends a branded HTML OTP email with a plain-text fallback."""
     text_body = build_otp_email_text(user.full_name or user.phone_number, otp, title, intro_text)
     html_body = build_otp_email_html(user.full_name or user.phone_number, otp, title, intro_text)
 
@@ -85,17 +82,7 @@ def send_otp_email(user, otp, title, intro_text):
 
 
 class LoginView(APIView):
-    """
-    POST { phone_number, password }  -> password login (works every time; also used first-time)
-    POST { phone_number, mpin }      -> M-PIN login (only works once an M-PIN exists)
-
-    Responses:
-      { access, refresh, role, phone_number, full_name }   success
-      { mpin_required: true }                              password correct, no M-PIN set yet
-      { detail: "pending_approval" }                        account not yet approved
-      { detail: "account_deactivated" }                     account has been deactivated
-      { detail: "..." }                                     invalid credentials
-    """
+    """Login by password or M-PIN."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -136,9 +123,7 @@ class LoginView(APIView):
 
 
 class CreateMpinView(APIView):
-    """POST { phone_number, password, mpin, confirm_mpin }
-    Re-verifies the password and creates the M-PIN. Does NOT log the user
-    in — they must log in again using the new M-PIN."""
+    """Re-verifies the password and creates the M-PIN (does not log the user in)."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -172,22 +157,7 @@ class DetectRoleView(APIView):
         return Response(serializer.to_role_response())
 
 class CheckMobileAvailabilityView(APIView):
-    """
-    GET /check-mobile/?mobile_number=9845021190
-    Public, read-only pre-check used by the onboarding form's Primary
-    Contact step to warn the person a mobile number is already registered
-    *before* they reach final submit — where
-    CompanySubmitSerializer.validate_mobile_number would otherwise reject
-    it with the same message. "Already registered" means a CustomUser row
-    already has this phone_number, mirroring that check exactly.
-
-    NOTE: CustomUser.phone_number (and Company.mobile_number) are plain
-    10-digit fields with no stored country code — same format
-    validate_mobile_number enforces at submit time. `country_code` is
-    accepted here for forward-compatibility with the multi-country
-    onboarding UI but isn't used in the lookup, since stored numbers
-    aren't country-scoped today (see note above).
-    """
+    """Public pre-check for whether a mobile number is already registered."""
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -201,11 +171,7 @@ class CheckMobileAvailabilityView(APIView):
 # ---------------------------------------------------------------------------
 
 class OnboardingDraftView(APIView):
-    """
-    POST { draft_token?, ...form fields, products: [...] }
-    Upserts a Company in DRAFT status. No account is created here.
-    Response: { draft_token }
-    """
+    """Upserts a Company in DRAFT status. No account is created here."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -216,12 +182,7 @@ class OnboardingDraftView(APIView):
 
 
 class OnboardingSubmitView(APIView):
-    """
-    POST { ...all form fields, password, confirm_password, products: [...] }
-    Validates required fields, creates the (unapproved) CustomUser account
-    using the password supplied in the form, finalises the Company as
-    PENDING, and emails a "received" confirmation.
-    """
+    """Creates the (unapproved) CustomUser account, finalises the Company as PENDING."""
     permission_classes = [AllowAny]
 
     @transaction.atomic
@@ -245,7 +206,8 @@ class OnboardingSubmitView(APIView):
         else:
             company = Company(**validated)
 
-        company.company_code = generate_company_code()
+        # Left as None (not '') when blank so multiple blanks don't collide on the unique constraint.
+        company.company_code = company.company_code or None
         company.status = Company.Status.PENDING
         company.submitted_at = timezone.now()
 
@@ -297,8 +259,7 @@ class CompanyDetailView(APIView):
 
 
 class ApproveCompanyView(APIView):
-    """The customer already set their own password at signup, so approval
-    just unlocks login — no password is generated or emailed here."""
+    """Unlocks login for an already-registered customer's account."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, company_id):
@@ -322,8 +283,7 @@ class ApproveCompanyView(APIView):
 
 
 class RevokeCompanyApprovalView(APIView):
-    """Reverses an approval: sends the company back to PENDING and blocks
-    the linked user from logging in again until re-approved."""
+    """Reverses an approval: sends the company back to PENDING and blocks login."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, company_id):
@@ -371,11 +331,7 @@ class RejectCompanyView(APIView):
 
 
 class MyProductsView(APIView):
-    """
-    GET /my-products/
-    Returns the products THIS customer's company had verified/approved by
-    an admin during Account Approvals (Step B).
-    """
+    """Products this customer's company had verified by an admin during Account Approvals."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -555,12 +511,7 @@ class StaffAssignedCustomersView(APIView):
 
 
 class StaffAssignedTicketsView(APIView):
-    """GET /staff/<id>/assigned-tickets/
-    Tickets currently assigned to this staff member (Ticket.assigned_staff).
-    Sibling of StaffAssignedCustomersView above — same auth, same 404
-    behavior, just sourced from Ticket instead of StaffAssignment. This is
-    what the Staff Management detail slide-over calls to populate an
-    "Assigned Tickets" section next to "Assigned Customers"."""
+    """Tickets currently assigned to this staff member."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request, staff_id):
@@ -631,10 +582,7 @@ class StaffDepartmentDeleteView(APIView):
 
 
 class CustomerListView(generics.ListAPIView):
-    """
-    GET /customers/?search=...&status=active|pending|blocked
-    Admin/staff only. Lists all customer-role accounts with search + filter.
-    """
+    """Admin/staff only. Lists all customer-role accounts with search + filter."""
     serializer_class = CustomerListSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
@@ -663,14 +611,7 @@ class CustomerListView(generics.ListAPIView):
 
 
 class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """
-    GET    /customers/<id>/   — full detail for the View panel
-    PATCH  /customers/<id>/   — Edit action (name/email/phone only)
-    DELETE /customers/<id>/   — permanently removes the account. Blocked
-                                 (409) if the customer has raised any
-                                 tickets — see DeleteCustomerModal.jsx,
-                                 which surfaces this same rule client-side.
-    """
+    """View/edit/delete a customer account. Delete is blocked (409) if the customer has raised tickets."""
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
     queryset = User.objects.filter(role=User.Role.CUSTOMER).select_related("company")
 
@@ -700,10 +641,7 @@ class CustomerDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class CustomerDeactivateView(APIView):
-    """
-    PATCH /customers/<id>/deactivate/
-    Toggles is_active.
-    """
+    """Toggles is_active for a customer."""
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
     def patch(self, request, pk):
@@ -718,19 +656,7 @@ class CustomerDeactivateView(APIView):
 
 
 class CustomerAddProductView(APIView):
-    """
-    POST /customers/<id>/products/  { product_id }
-    Admin/staff picks a Product Master catalog entry for a customer who's
-    purchased something new since registration. Creates a Product row on
-    the customer's company (name/version copied from the catalog,
-    activation_date defaults to today), appends the name to
-    Company.products_in_use if it isn't already there, and marks it
-    "Verified" in product_verification — this admin-initiated add IS the
-    verification, unlike onboarding-time products which go through the
-    separate Account Approvals review (VerifyProductsView) before a
-    customer can raise tickets against them (see MyProductsView, which
-    only returns names marked Verified).
-    """
+    """Admin/staff adds a Product Master catalog entry to a customer's company, pre-verified."""
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, pk):
@@ -773,12 +699,7 @@ class CustomerAddProductView(APIView):
 
 
 class CustomerRemoveProductView(APIView):
-    """
-    DELETE /customers/<id>/products/<product_id>/
-    Removes a single Product row from the customer's company. Also drops
-    the name from Company.products_in_use and product_verification if no
-    other Product row with that name remains for this company.
-    """
+    """Removes a Product row; also drops it from products_in_use/product_verification if unused elsewhere."""
     permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
 
     def delete(self, request, pk, product_id):
@@ -833,10 +754,7 @@ class LogoutView(APIView):
         return Response({"detail": "Logged out successfully."})
     
 class ProfileView(APIView):
-    """
-    GET   /profile/   — the logged-in user's own basic details
-    PATCH /profile/   — edit full_name / email only (see ProfileSerializer)
-    """
+    """Get/edit the logged-in user's own basic profile details."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -850,14 +768,7 @@ class ProfileView(APIView):
 
 
 class RequestMpinChangeOtpView(APIView):
-    """
-    POST /mpin/change/request-otp/
-    Generates a 4-digit OTP, emails it (branded HTML, see send_otp_email
-    above) to the logged-in user's registered email, and stores a hashed
-    copy (10 min expiry). Any previous unused OTPs for this user+purpose
-    are invalidated first — same "only the latest one is live" pattern as
-    flipping stale pending offers in AcceptTicketAssignmentView.
-    """
+    """Generates and emails a 4-digit OTP to change the M-PIN (10 min expiry)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -891,10 +802,7 @@ class RequestMpinChangeOtpView(APIView):
 
 
 class VerifyMpinChangeOtpView(APIView):
-    """POST /mpin/change/verify-otp/  { otp }
-    Marks the latest matching OTP row as verified. Doesn't change the
-    M-PIN yet — ChangeMpinView below checks for a verified row instead of
-    accepting the OTP a second time."""
+    """Marks the latest matching OTP row as verified (doesn't change the M-PIN yet)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -918,9 +826,7 @@ class VerifyMpinChangeOtpView(APIView):
 
 
 class ChangeMpinView(APIView):
-    """POST /mpin/change/  { new_mpin, confirm_mpin }
-    Requires a verified, unused, unexpired OTP row for this user (see
-    VerifyMpinChangeOtpView above)."""
+    """Requires a verified, unused, unexpired OTP row for this user."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -950,27 +856,10 @@ class ChangeMpinView(APIView):
         return Response({"detail": "M-PIN changed successfully."})
 
 
-# ---------------------------------------------------------------------------
-# Forgot M-PIN — unauthenticated flow from the login screen's
-# "Forgot M-PIN?" link. Mirrors RequestMpinChangeOtpView / VerifyMpinChangeOtpView
-# / ChangeMpinView above exactly, except:
-#   - permission_classes = [AllowAny] instead of [IsAuthenticated] (no
-#     session exists yet — that's the whole point of "forgot")
-#   - identity comes from phone_number in the request body instead of
-#     request.user, since there's no authenticated user to read it from
-#   - uses EmailOTP.PURPOSE_MPIN_FORGOT instead of PURPOSE_MPIN_CHANGE, so
-#     an in-flight "forgot" OTP and an in-flight "change" OTP (e.g. from a
-#     different device where the person IS logged in) never collide or
-#     get consumed by the wrong flow
-# ---------------------------------------------------------------------------
+# Forgot M-PIN — unauthenticated flow from the login screen's "Forgot M-PIN?" link.
 
 class RequestForgotMpinOtpView(APIView):
-    """
-    POST /mpin/forgot/request-otp/  { phone_number }
-    Used from the login screen — before any session exists. Identity is
-    proven via OTP-to-registered-email rather than a password, since the
-    whole point is the person doesn't have their M-PIN handy.
-    """
+    """Used from the login screen before any session exists; identity proven via emailed OTP."""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -1010,8 +899,7 @@ class RequestForgotMpinOtpView(APIView):
             intro_text="Use the code below to verify it's you, then you'll be able to set a new M-PIN.",
         )
 
-        # Masked so the login screen can show "OTP sent to j***n@gmail.com"
-        # without exposing the full address to whoever's at the keyboard.
+        # Masked so the login screen can show it without exposing the full address.
         masked_email = user.email[0] + "***" + user.email[user.email.index("@"):]
         return Response({"detail": "OTP sent to your registered email.", "masked_email": masked_email})
 
@@ -1045,9 +933,7 @@ class VerifyForgotMpinOtpView(APIView):
 
 
 class ResetForgotMpinView(APIView):
-    """POST /mpin/forgot/reset/  { phone_number, new_mpin, confirm_mpin }
-    Requires a verified, unused, unexpired OTP row for this user (see
-    VerifyForgotMpinOtpView above) — same pattern as ChangeMpinView."""
+    """Requires a verified, unused, unexpired OTP row for this user."""
     permission_classes = [AllowAny]
 
     def post(self, request):

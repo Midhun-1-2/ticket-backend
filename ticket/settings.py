@@ -89,21 +89,11 @@ DATABASES = {
 }
 
 
-# Custom user model — must be set before the first `migrate`. Cannot be
-# changed later without a fresh database (the auth tables get built
-# against whichever model is set at migration time).
+# Custom user model.
 AUTH_USER_MODEL = 'authentication.CustomUser'
 
 
-# Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
-#
-# NOTE: the M-PIN is stored via Django's password field, but it's a
-# short numeric code by design — not a traditional password. The
-# defaults below (min 8 chars, rejects all-numeric values) would block
-# `createsuperuser` and admin-created accounts from ever accepting a
-# valid M-PIN, so they're adjusted here to just enforce a sane minimum
-# length instead.
+# Password validation — adjusted for M-PIN (short numeric code) instead of a traditional password.
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
@@ -135,17 +125,7 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 
-# Email
-# https://docs.djangoproject.com/en/6.0/topics/email/
-#
-# Used by the onboarding flow to send the "registration received" email
-# on submit, and the "account approved" email (with login credentials)
-# once an admin approves a company. The console backend just prints
-# emails to the terminal running `manage.py runserver` — good enough for
-# development. Swap to an SMTP backend before going to production.
-#
-# Also now used by the M-PIN change OTP flow (authentication.views.
-# RequestMpinChangeOtpView) — same backend, no extra config needed.
+# Email — used by onboarding notifications and the M-PIN change/reset OTP flows.
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587

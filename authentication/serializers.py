@@ -254,7 +254,7 @@ class CompanyRejectSerializer(serializers.Serializer):
 
 class ProductVerificationSerializer(serializers.Serializer):
     """Accepts { product_verification: {name: status}, verification_note }"""
-    VALID_STATUSES = ["Verified", "Needs Clarification", "Not Found in Records"]
+    VALID_STATUSES = ["Verified", "Not Found in Records"]
 
     product_verification = serializers.DictField(
         child=serializers.ChoiceField(choices=VALID_STATUSES), required=False

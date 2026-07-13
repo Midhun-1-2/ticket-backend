@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from authentication.models import StaffAssignment, StaffProduct
+from authentication.models import Product, StaffAssignment, StaffProduct
 from authentication.permissions import IsAdmin, IsAdminOrStaff
 from authentication.email_templates import (
     build_ticket_raised_email_html,
@@ -119,21 +119,26 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 # ---------------------------------------------------------------------------
 
 def get_eligible_staff_ids(ticket):
-    """Staff currently tied to the ticket's raising company, primary or scoped to its product."""
+    """Staff currently tied to the ticket's raising company, primary or scoped to its
+    product. Deactivated staff (CustomUser.is_active=False) are excluded here — this
+    is the single choke point that makes deactivation "remove" a staff member from
+    ticket routing and reactivation "restore" it, without ever touching the
+    underlying StaffAssignment/StaffProduct rows."""
     raiser = ticket.raised_by
     company = getattr(raiser, 'company', None) if raiser else None
     if not company:
         return set()
 
     company_staff_ids = set(
-        StaffAssignment.objects.filter(company=company, is_current=True)
+        StaffAssignment.objects.filter(company=company, is_current=True, staff__is_active=True)
         .filter(Q(product_name='') | Q(product_name=ticket.product))
         .values_list('staff_id', flat=True)
     )
 
     # Narrow to staff configured (via Product Master) to handle this specific product.
     product_staff_ids = set(
-        StaffProduct.objects.filter(product_name=ticket.product).values_list('staff_id', flat=True)
+        StaffProduct.objects.filter(product_name=ticket.product, staff__is_active=True)
+        .values_list('staff_id', flat=True)
     )
     if product_staff_ids:
         return company_staff_ids & product_staff_ids
@@ -157,6 +162,55 @@ def offer_ticket_to_eligible_staff(ticket):
         touched.append(obj)
         log_assignment_event(ticket, 'offered', staff=obj.staff)
     return touched
+
+
+def release_staff_tickets(staff_user):
+    """Called when a staff member is deactivated. Unassigns every ticket
+    currently in their hands (not yet Resolved/Closed) and re-offers it to
+    whoever else is eligible — get_eligible_staff_ids already excludes
+    inactive staff, so this staff member won't be offered it back. Also
+    cancels any pending offers still sitting with them, so a ticket never
+    sits waiting on a response from someone who can no longer log in."""
+    active_tickets = Ticket.objects.filter(assigned_staff=staff_user).exclude(
+        status__in=['Resolved', 'Closed']
+    )
+    for ticket in active_tickets:
+        TicketAssignment.objects.filter(ticket=ticket, staff=staff_user).update(
+            status='unavailable', responded_at=timezone.now()
+        )
+        log_assignment_event(ticket, 'unavailable', staff=staff_user, note='Staff account deactivated')
+        ticket.assigned_staff = None
+        ticket.save(update_fields=['assigned_staff', 'updated_at'])
+        offer_ticket_to_eligible_staff(ticket)
+
+    pending = TicketAssignment.objects.filter(staff=staff_user, status='pending').select_related('ticket')
+    for assignment in pending:
+        assignment.status = 'unavailable'
+        assignment.responded_at = timezone.now()
+        assignment.save(update_fields=['status', 'responded_at'])
+        log_assignment_event(assignment.ticket, 'unavailable', staff=staff_user, note='Staff account deactivated')
+
+
+def restore_staff_eligibility(staff_user):
+    """Called when a staff member is reactivated. Offers them any
+    currently-unassigned, still-open ticket they're eligible for again —
+    the same tickets offer_ticket_to_eligible_staff would have offered
+    them had they been active all along."""
+    unassigned_tickets = Ticket.objects.filter(assigned_staff__isnull=True).exclude(
+        status__in=['Resolved', 'Closed']
+    )
+    for ticket in unassigned_tickets:
+        if staff_user.id not in get_eligible_staff_ids(ticket):
+            continue
+        obj, was_created = TicketAssignment.objects.get_or_create(
+            ticket=ticket, staff=staff_user, defaults={'status': 'pending'}
+        )
+        if not was_created and obj.status != 'pending':
+            obj.status = 'pending'
+            obj.responded_at = None
+            obj.transferred_to = None
+            obj.save(update_fields=['status', 'responded_at', 'transferred_to'])
+        log_assignment_event(ticket, 'offered', staff=staff_user, note='Staff account reactivated')
 
 
 class TicketListCreateView(generics.ListCreateAPIView):
@@ -200,11 +254,31 @@ class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 def _can_manage_ticket(user, ticket):
-    """Who can change a ticket's status, transfer it, or escalate it."""
-    if ticket.assigned_staff_id is None:
-        return getattr(user, 'role', None) == 'admin'
-    if getattr(ticket.assigned_staff, 'role', None) == 'admin':
-        return getattr(user, 'role', None) == 'admin'
+    """Who can change a ticket's status, transfer it, or escalate it.
+    Closed is a terminal state — nobody (not even admin) can manage it
+    further from here on. Resolved is NOT terminal: it must still be
+    movable to Closed by the assigned staff or admin. Admin can manage
+    ANY non-terminal ticket regardless of who it's assigned to (mirrors
+    _can_transfer_ticket) — a regular staff member can only manage a
+    ticket currently assigned to them."""
+    if ticket.status == 'Closed':
+        return False
+    if getattr(user, 'role', None) == 'admin':
+        return True
+    return ticket.assigned_staff_id == user.id
+
+
+def _can_transfer_ticket(user, ticket):
+    """Who can reassign a ticket to a different staff member. Deliberately
+    more permissive than _can_manage_ticket: an admin can transfer ANY
+    non-terminal ticket to rebalance workload, even one currently held by
+    a staff member (who still owns its status/escalation — this only
+    covers who it's assigned to). A regular staff member can still only
+    transfer a ticket they're currently holding themselves."""
+    if ticket.status == 'Closed':
+        return False
+    if getattr(user, 'role', None) == 'admin':
+        return True
     return ticket.assigned_staff_id == user.id
 
 
@@ -249,6 +323,11 @@ class TicketStatusUpdateView(APIView):
         ticket = Ticket.objects.filter(id=pk).first()
         if not ticket:
             return Response({'detail': 'Ticket not found.'}, status=404)
+        if ticket.status == 'Closed':
+            return Response(
+                {'detail': 'This ticket is already closed and its status can no longer be changed.'},
+                status=400,
+            )
         if not _can_manage_ticket(request.user, ticket):
             return Response({'detail': 'Only the assigned staff member or an admin can update this ticket.'}, status=403)
 
@@ -260,7 +339,19 @@ class TicketStatusUpdateView(APIView):
         remark = serializer.validated_data['remark']
 
         ticket.status = new_status
-        ticket.save(update_fields=['status', 'updated_at'])
+        update_fields = ['status', 'updated_at']
+        # closed_at was declared on the model but never actually set anywhere
+        # — Closed On always showed "—". Set it on the transition into
+        # Closed; cleared if a ticket somehow leaves Closed again (can't
+        # happen via this endpoint today since Closed is terminal, but kept
+        # for parity with the model's documented contract).
+        if new_status == 'Closed' and previous_status != 'Closed':
+            ticket.closed_at = timezone.now()
+            update_fields.append('closed_at')
+        elif new_status != 'Closed' and ticket.closed_at is not None:
+            ticket.closed_at = None
+            update_fields.append('closed_at')
+        ticket.save(update_fields=update_fields)
 
         TicketStatusHistory.objects.create(
             ticket=ticket, from_status=previous_status, to_status=new_status,
@@ -275,14 +366,18 @@ class TicketStatusUpdateView(APIView):
 
 
 class TransferTicketView(APIView):
-    """Hands a ticket to another staff member as a fresh PENDING offer they must accept/decline."""
+    """Hands a ticket to another staff member immediately and completely —
+    same immediate-handoff pattern as EscalateTicketView, no accept/decline
+    step. The incoming staff's TicketAssignment row is created 'accepted'
+    outright and ticket.assigned_staff flips to them in the same request,
+    so the ticket is never left dangling unassigned waiting on a response."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
         ticket = Ticket.objects.filter(id=pk).first()
         if not ticket:
             return Response({'detail': 'Ticket not found.'}, status=404)
-        if not _can_manage_ticket(request.user, ticket):
+        if not _can_transfer_ticket(request.user, ticket):
             return Response({'detail': 'Only the assigned staff member or an admin can transfer this ticket.'}, status=403)
 
         serializer = TransferTicketSerializer(data=request.data)
@@ -307,21 +402,22 @@ class TransferTicketView(APIView):
 
             incoming, created = TicketAssignment.objects.get_or_create(
                 ticket=ticket, staff=new_staff,
-                defaults={'status': 'pending'},
+                defaults={'status': 'accepted', 'responded_at': timezone.now()},
             )
             if not created:
-                incoming.status = 'pending'
-                incoming.responded_at = None
+                incoming.status = 'accepted'
+                incoming.responded_at = timezone.now()
                 incoming.transferred_to = None
                 incoming.save(update_fields=['status', 'responded_at', 'transferred_to'])
 
             # Permanent log entry for this hop.
             log_assignment_event(ticket, 'transferred', staff=outgoing_staff, to_staff=new_staff)
 
-            # Unassigned until the new staff member accepts.
             # escalated/escalated_at/escalation_note are kept as permanent history, not cleared.
-            ticket.assigned_staff = None
-            ticket.save(update_fields=['assigned_staff', 'updated_at'])
+            ticket.assigned_staff = new_staff
+            if ticket.status == 'Open':
+                ticket.status = 'In Progress'
+            ticket.save(update_fields=['assigned_staff', 'status', 'updated_at'])
 
         return Response(TicketSerializer(ticket).data)
 
@@ -510,9 +606,14 @@ class DeclineTicketAssignmentView(APIView):
 # ---------------------------------------------------------------------------
 
 class ProductMasterListCreateView(generics.ListCreateAPIView):
-    """List/create Product Master entries. Admin only."""
+    """List Product Master entries — admin and staff can list (e.g. to
+    populate the All Tickets product filter); only admin can create."""
     serializer_class = ProductMasterSerializer
-    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [permissions.IsAuthenticated(), IsAdmin()]
+        return [permissions.IsAuthenticated(), IsAdminOrStaff()]
 
     def get_queryset(self):
         qs = ProductMaster.objects.all()
@@ -547,12 +648,48 @@ class ProductStaffMapView(APIView):
         existing = set(
             StaffProduct.objects.filter(product_name=product_name).values_list('staff_id', flat=True)
         )
+        removed_ids = existing - staff_ids
+        added_ids = staff_ids - existing
+
         StaffProduct.objects.filter(
-            product_name=product_name, staff_id__in=existing - staff_ids
+            product_name=product_name, staff_id__in=removed_ids
         ).delete()
         StaffProduct.objects.bulk_create([
-            StaffProduct(staff_id=sid, product_name=product_name) for sid in staff_ids - existing
+            StaffProduct(staff_id=sid, product_name=product_name) for sid in added_ids
         ])
+
+        # Keep customer assignments in sync with this product's handler
+        # list — every company that already has this product gains newly
+        # linked staff and loses unlinked ones, same as what adding the
+        # product to a customer does (see CustomerAddProductView).
+        company_ids = list(
+            Product.objects.filter(product_name=product_name)
+            .values_list('company_id', flat=True).distinct()
+        )
+
+        if added_ids and company_ids:
+            already_assigned = set(
+                StaffAssignment.objects.filter(
+                    company_id__in=company_ids, product_name=product_name,
+                    staff_id__in=added_ids, is_current=True,
+                ).values_list('company_id', 'staff_id')
+            )
+            StaffAssignment.objects.bulk_create([
+                StaffAssignment(
+                    company_id=company_id, staff_id=staff_id, product_name=product_name,
+                    assigned_by=request.user,
+                )
+                for company_id in company_ids
+                for staff_id in added_ids
+                if (company_id, staff_id) not in already_assigned
+            ])
+
+        if removed_ids and company_ids:
+            StaffAssignment.objects.filter(
+                company_id__in=company_ids, product_name=product_name,
+                staff_id__in=removed_ids, is_current=True,
+            ).update(is_current=False)
+
         return Response({
             'product_name': product_name,
             'staff_ids': list(staff_ids),

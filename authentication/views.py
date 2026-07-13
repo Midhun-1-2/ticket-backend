@@ -12,7 +12,7 @@ import random
 from datetime import timedelta
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
-from .models import Company, EmailOTP, Mpin, Product, StaffAssignment, StaffRole, StaffDepartment
+from .models import Company, EmailOTP, Mpin, Product, StaffAssignment, StaffProduct, StaffRole, StaffDepartment
 from .permissions import IsAdminOrStaff
 from .email_templates import build_otp_email_html, build_otp_email_text
 from .serializers import (
@@ -51,6 +51,7 @@ from .utils import (
     send_rejection_email,
 )
 from ticketapp.models import ProductMaster, Ticket
+from ticketapp.views import release_staff_tickets, restore_staff_eligibility
 
 User = get_user_model()
 
@@ -481,14 +482,30 @@ class StaffDetailView(APIView):
 
 
 class StaffToggleStatusView(APIView):
+    """Flips a staff member's active status. Deactivating releases every
+    ticket/offer currently in their hands back to other eligible staff;
+    reactivating re-offers them anything still open they're eligible for
+    again — see release_staff_tickets/restore_staff_eligibility. Their
+    StaffAssignment/StaffProduct rows are never touched either way —
+    get_eligible_staff_ids excludes inactive staff, so deactivation
+    "removes" and reactivation "restores" their links automatically."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, staff_id):
         user = User.objects.filter(id=staff_id, role=User.Role.STAFF).first()
         if not user:
             return Response({"detail": "Staff member not found."}, status=404)
-        user.is_active = not user.is_active
-        user.save()
+
+        with transaction.atomic():
+            was_active = user.is_active
+            user.is_active = not user.is_active
+            user.save()
+
+            if was_active and not user.is_active:
+                release_staff_tickets(user)
+            elif not was_active and user.is_active:
+                restore_staff_eligibility(user)
+
         return Response(StaffListSerializer(user).data)
 
 
@@ -694,6 +711,27 @@ class CustomerAddProductView(APIView):
 
         if update_fields:
             company.save(update_fields=update_fields)
+
+        # Staff already linked to this product (Product Master's "staff who
+        # handle this product") get assigned to this customer for it
+        # automatically — mirrors what Account Approvals' Step C does
+        # manually, so a product added post-onboarding still routes
+        # tickets correctly without an admin having to reassign staff.
+        linked_staff_ids = StaffProduct.objects.filter(
+            product_name=product_master.name
+        ).values_list("staff_id", flat=True)
+        existing_staff_ids = set(
+            StaffAssignment.objects.filter(
+                company=company, product_name=product_master.name, is_current=True
+            ).values_list("staff_id", flat=True)
+        )
+        StaffAssignment.objects.bulk_create([
+            StaffAssignment(
+                company=company, staff_id=staff_id, product_name=product_master.name,
+                assigned_by=request.user,
+            )
+            for staff_id in linked_staff_ids if staff_id not in existing_staff_ids
+        ])
 
         return Response(ProductSerializer(product).data, status=http_status.HTTP_201_CREATED)
 

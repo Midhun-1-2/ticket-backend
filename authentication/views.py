@@ -10,11 +10,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 import random
 from datetime import timedelta
-from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
 from .models import Company, EmailOTP, Mpin, Product, StaffAssignment, StaffProduct, StaffRole, StaffDepartment
 from .permissions import IsAdminOrStaff
-from .email_templates import build_otp_email_html, build_otp_email_text
+from .email_templates import build_otp_email_html, build_otp_email_text, send_branded_email
 from .serializers import (
     CompanyDetailSerializer,
     CompanyDraftSerializer,
@@ -71,15 +69,7 @@ def send_otp_email(user, otp, title, intro_text):
     """Sends a branded HTML OTP email with a plain-text fallback."""
     text_body = build_otp_email_text(user.full_name or user.phone_number, otp, title, intro_text)
     html_body = build_otp_email_html(user.full_name or user.phone_number, otp, title, intro_text)
-
-    email = EmailMultiAlternatives(
-        subject=title,
-        body=text_body,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[user.email],
-    )
-    email.attach_alternative(html_body, "text/html")
-    email.send(fail_silently=False)
+    send_branded_email(user.email, title, text_body, html_body)
 
 
 class LoginView(APIView):

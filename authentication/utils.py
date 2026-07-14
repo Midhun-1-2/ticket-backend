@@ -49,7 +49,7 @@ def send_approval_email(company):
             contact_name, company.company_name, company.user.phone_number
         )
         send_branded_email(
-            company.email, "Welcome to Ticket Desk", text_body, html_body
+            company.email, "Welcome to TIXA", text_body, html_body
         )
     except Exception:
         pass

@@ -72,6 +72,18 @@ def send_otp_email(user, otp, title, intro_text):
     send_branded_email(user.email, title, text_body, html_body)
 
 
+def _rejected_company(user):
+    """A rejected registration deactivates the user the same way a manual
+    deactivation does, so `is_active` alone can't tell them apart. Returns
+    the Company if this user's inactivity is actually a rejection, else None."""
+    if getattr(user, 'role', None) != User.Role.CUSTOMER:
+        return None
+    company = getattr(user, 'company', None)
+    if company and company.status == Company.Status.REJECTED:
+        return company
+    return None
+
+
 class LoginView(APIView):
     """Login by password or M-PIN."""
     permission_classes = [AllowAny]
@@ -102,6 +114,12 @@ class LoginView(APIView):
                 return Response({"detail": "Incorrect phone number or password."}, status=400)
 
         if not user.is_active:
+            rejected_company = _rejected_company(user)
+            if rejected_company:
+                return Response(
+                    {"detail": "account_rejected", "reason": rejected_company.rejection_reason},
+                    status=403,
+                )
             return Response({"detail": "account_deactivated"}, status=403)
 
         if not user.is_approved:
@@ -206,6 +224,7 @@ class OnboardingSubmitView(APIView):
             phone_number=company.mobile_number,
             password=password,
             full_name=company.contact_name,
+            email=company.email,
             role=User.Role.CUSTOMER,
         )
         company.user = user
@@ -310,6 +329,7 @@ class RejectCompanyView(APIView):
         company.status = Company.Status.REJECTED
         company.reviewed_at = timezone.now()
         company.reviewed_by = request.user
+        company.rejection_reason = reason
         company.save()
 
         if company.user:
@@ -904,6 +924,12 @@ class RequestForgotMpinOtpView(APIView):
                 status=400,
             )
         if not user.is_active:
+            rejected_company = _rejected_company(user)
+            if rejected_company:
+                return Response(
+                    {"detail": "account_rejected", "reason": rejected_company.rejection_reason},
+                    status=403,
+                )
             return Response({"detail": "account_deactivated"}, status=403)
         if not user.is_approved:
             return Response({"detail": "pending_approval"}, status=403)

@@ -202,6 +202,7 @@ class CompanyListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "company_code", "company_name", "company_type", "contact_name",
             "email", "mobile_number", "city", "state", "status", "submitted_at",
+            "reviewed_at", "rejection_reason",
         ]
 
 
@@ -221,7 +222,7 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
             "amc_status", "amc_start_date", "amc_end_date", "preferred_channel",
             "preferred_time", "remarks", "products_in_use", "contract_ref_number",
             "products", "submitted_at", "reviewed_at",
-            "product_verification", "verification_note",
+            "product_verification", "verification_note", "rejection_reason",
             "staff_assignment",
         ]
 

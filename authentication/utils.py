@@ -1,3 +1,4 @@
+import logging
 import secrets
 import string
 
@@ -10,6 +11,8 @@ from .email_templates import (
     build_rejection_email_text,
     send_branded_email,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def generate_temp_password(length=10):
@@ -33,8 +36,9 @@ def send_registration_received_email(company):
             company.email, "We've got your registration", text_body, html_body
         )
     except Exception:
-        # Fail silently — registration must succeed even if mail fails.
-        pass
+        # Registration must still succeed even if mail fails — but log it,
+        # since silently losing this used to mean no one ever found out.
+        logger.exception("Failed to send registration-received email to %s", company.email)
 
 
 def send_approval_email(company):
@@ -52,7 +56,7 @@ def send_approval_email(company):
             company.email, "Welcome to TIXA", text_body, html_body
         )
     except Exception:
-        pass
+        logger.exception("Failed to send approval email to %s", company.email)
 
 
 def send_rejection_email(company, reason=""):
@@ -66,4 +70,4 @@ def send_rejection_email(company, reason=""):
             company.email, "Update on your registration", text_body, html_body
         )
     except Exception:
-        pass
+        logger.exception("Failed to send rejection email to %s", company.email)

@@ -254,8 +254,8 @@ class Company(models.Model):
     product_verification = models.JSONField(default=dict, blank=True)
     verification_note = models.TextField(blank=True)
 
-    # Reason an admin gave when rejecting this registration — shown back to
-    # the customer if they try to log in afterward.
+    # Reason an admin gave when rejecting this registration — kept (not
+    # cleared) even after a later approval, as a historical trace.
     rejection_reason = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

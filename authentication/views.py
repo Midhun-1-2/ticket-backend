@@ -72,16 +72,15 @@ def send_otp_email(user, otp, title, intro_text):
     send_branded_email(user.email, title, text_body, html_body)
 
 
-def _rejected_company(user):
-    """A rejected registration deactivates the user the same way a manual
-    deactivation does, so `is_active` alone can't tell them apart. Returns
-    the Company if this user's inactivity is actually a rejection, else None."""
-    if getattr(user, 'role', None) != User.Role.CUSTOMER:
-        return None
-    company = getattr(user, 'company', None)
+def inactive_account_response(user):
+    """Distinguishes an admin-rejected account from a plain deactivation."""
+    company = getattr(user, "company", None)
     if company and company.status == Company.Status.REJECTED:
-        return company
-    return None
+        return Response(
+            {"detail": "account_rejected", "reason": company.rejection_reason or ""},
+            status=403,
+        )
+    return Response({"detail": "account_deactivated"}, status=403)
 
 
 class LoginView(APIView):
@@ -114,13 +113,7 @@ class LoginView(APIView):
                 return Response({"detail": "Incorrect phone number or password."}, status=400)
 
         if not user.is_active:
-            rejected_company = _rejected_company(user)
-            if rejected_company:
-                return Response(
-                    {"detail": "account_rejected", "reason": rejected_company.rejection_reason},
-                    status=403,
-                )
-            return Response({"detail": "account_deactivated"}, status=403)
+            return inactive_account_response(user)
 
         if not user.is_approved:
             return Response({"detail": "pending_approval"}, status=403)
@@ -251,10 +244,13 @@ class OnboardingSubmitView(APIView):
 # ---------------------------------------------------------------------------
 
 class PendingCompanyListView(APIView):
+    """Despite the name (kept for URL/frontend compat), this returns every
+    registration regardless of status — pending, approved, and rejected —
+    so Account Approvals can render all three as separate sections."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
-        companies = Company.objects.filter(status=Company.Status.PENDING).order_by("-submitted_at")
+        companies = Company.objects.exclude(status=Company.Status.DRAFT).order_by("-submitted_at")
         return Response(CompanyListSerializer(companies, many=True).data)
 
 
@@ -269,17 +265,23 @@ class CompanyDetailView(APIView):
 
 
 class ApproveCompanyView(APIView):
-    """Unlocks login for an already-registered customer's account."""
+    """Unlocks login for an already-registered customer's account. Works from
+    PENDING or REJECTED — an admin can change their mind on a previously
+    rejected registration and approve it after all, since nothing was
+    deleted."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, company_id):
-        company = Company.objects.filter(id=company_id, status=Company.Status.PENDING).first()
+        company = Company.objects.filter(
+            id=company_id, status__in=[Company.Status.PENDING, Company.Status.REJECTED]
+        ).first()
         if not company:
-            return Response({"detail": "Pending registration not found."}, status=404)
+            return Response({"detail": "Registration not found."}, status=404)
         if not company.user:
             return Response({"detail": "No linked account for this registration."}, status=400)
 
         company.user.is_approved = True
+        company.user.is_active = True  # undo a prior rejection's deactivation, if any
         company.user.save()
 
         company.status = Company.Status.APPROVED
@@ -315,12 +317,17 @@ class RevokeCompanyApprovalView(APIView):
 
 
 class RejectCompanyView(APIView):
+    """Soft reject — nothing is deleted. The Company row stays (status flips
+    to REJECTED, account login blocked) so an admin can revisit and approve
+    it later; the customer is emailed the reason."""
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def post(self, request, company_id):
-        company = Company.objects.filter(id=company_id, status=Company.Status.PENDING).first()
+        company = Company.objects.filter(
+            id=company_id, status__in=[Company.Status.PENDING, Company.Status.REJECTED]
+        ).first()
         if not company:
-            return Response({"detail": "Pending registration not found."}, status=404)
+            return Response({"detail": "Registration not found."}, status=404)
 
         serializer = CompanyRejectSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -924,13 +931,7 @@ class RequestForgotMpinOtpView(APIView):
                 status=400,
             )
         if not user.is_active:
-            rejected_company = _rejected_company(user)
-            if rejected_company:
-                return Response(
-                    {"detail": "account_rejected", "reason": rejected_company.rejection_reason},
-                    status=403,
-                )
-            return Response({"detail": "account_deactivated"}, status=403)
+            return inactive_account_response(user)
         if not user.is_approved:
             return Response({"detail": "pending_approval"}, status=403)
 

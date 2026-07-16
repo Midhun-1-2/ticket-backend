@@ -146,6 +146,21 @@ class LoginView(APIView):
             )
             return Response({"detail": "pending_approval"}, status=403)
 
+        # AMC-expiry gate — only customers have a company; staff/admin are
+        # unaffected. See _customer_status (serializers.py) for the matching
+        # "Expired" status shown to admin, which flips back to "Active" on
+        # its own once the dates are renewed past today.
+        company = getattr(user, "company", None)
+        if company and company.amc_end_date and company.amc_end_date < timezone.localdate():
+            record_login_activity(
+                request, user=user, status="failed", failure_reason="AMC validity expired",
+            )
+            return Response(
+                {"detail": "amc_expired",
+                 "message": "Your AMC validity has expired. Please contact admin to renew."},
+                status=403,
+            )
+
         if not hasattr(user, "mpin"):
             return Response({"mpin_required": True})
 

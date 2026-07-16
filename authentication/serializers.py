@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Company, Product
@@ -144,6 +145,8 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
     email = serializers.EmailField()
     mobile_number = serializers.CharField(max_length=10, min_length=10)
     amc_status = serializers.CharField(max_length=20)
+    amc_start_date = serializers.DateField()
+    amc_end_date = serializers.DateField()
     products_in_use = serializers.ListField(child=serializers.CharField(), min_length=1)
 
     # Not model fields — used only to create the CustomUser account, then discarded.
@@ -489,11 +492,17 @@ class StaffUpdateSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 
 def _customer_status(user):
-    """Single source of truth for the three-state status shown in the UI."""
+    """Single source of truth for the status shown in the UI. "Expired" is
+    computed live from the company's AMC end date rather than stored, so a
+    renewal (pushing amc_end_date into the future) flips it straight back
+    to "Active" on its own — see LoginView for the matching login block."""
     if not user.is_active:
         return "Blocked"
     if not user.is_approved:
         return "Pending Approval"
+    company = getattr(user, "company", None)
+    if company and company.amc_end_date and company.amc_end_date < timezone.localdate():
+        return "Expired"
     return "Active"
 
 
@@ -535,10 +544,11 @@ class CustomerListSerializer(serializers.ModelSerializer):
     email = serializers.SerializerMethodField()
     company = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
+    amc_valid_till = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "name", "email", "phone", "company", "status", "date_joined"]
+        fields = ["id", "name", "email", "phone", "company", "status", "date_joined", "amc_valid_till"]
 
     def get_email(self, obj):
         return _customer_email(obj)
@@ -546,6 +556,10 @@ class CustomerListSerializer(serializers.ModelSerializer):
     def get_company(self, obj):
         company = getattr(obj, "company", None)
         return company.company_name if company else "—"
+
+    def get_amc_valid_till(self, obj):
+        company = getattr(obj, "company", None)
+        return company.amc_end_date if company else None
 
     def get_status(self, obj):
         return _customer_status(obj)
@@ -613,11 +627,16 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
 
 
 class CustomerUpdateSerializer(serializers.ModelSerializer):
-    """Used for PATCH — the Edit action. Only identity fields are editable
-    here; company details belong to the onboarding flow, not this screen."""
+    """Used for PATCH — the Edit action. Identity fields are editable here;
+    the AMC start/end dates are too — they live on the company record, not
+    the user, but this is where an admin renews a lapsed AMC so the account
+    stops being blocked at login (see LoginView / _customer_status)."""
+    amc_start_date = serializers.DateField(required=False, allow_null=True)
+    amc_end_date = serializers.DateField(required=False, allow_null=True)
+
     class Meta:
         model = User
-        fields = ["full_name", "email", "phone_number"]
+        fields = ["full_name", "email", "phone_number", "amc_start_date", "amc_end_date"]
         extra_kwargs = {
             "full_name": {"required": False},
             "email": {"required": False},
@@ -639,6 +658,33 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("Another account already uses this phone number.")
         return value
+
+    def validate(self, attrs):
+        if "amc_start_date" in attrs or "amc_end_date" in attrs:
+            company = getattr(self.instance, "company", None)
+            start = attrs.get("amc_start_date", company.amc_start_date if company else None)
+            end = attrs.get("amc_end_date", company.amc_end_date if company else None)
+            if start and end and end < start:
+                raise serializers.ValidationError({"amc_end_date": "AMC end date cannot be before the start date."})
+        return attrs
+
+    def update(self, instance, validated_data):
+        has_start = "amc_start_date" in validated_data
+        has_end = "amc_end_date" in validated_data
+        amc_start = validated_data.pop("amc_start_date", None)
+        amc_end = validated_data.pop("amc_end_date", None)
+        instance = super().update(instance, validated_data)
+        company = getattr(instance, "company", None)
+        if company and (has_start or has_end):
+            update_fields = []
+            if has_start:
+                company.amc_start_date = amc_start
+                update_fields.append("amc_start_date")
+            if has_end:
+                company.amc_end_date = amc_end
+                update_fields.append("amc_end_date")
+            company.save(update_fields=update_fields)
+        return instance
 
 
 class CustomerAddProductSerializer(serializers.Serializer):

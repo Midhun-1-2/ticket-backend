@@ -1,12 +1,18 @@
+import logging
+import os
 import uuid
+from io import BytesIO
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
+from django.core.files.base import ContentFile
 from django.core.validators import RegexValidator
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 phone_validator = RegexValidator(
     regex=r"^\d{10}$",
@@ -109,6 +115,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)  # Django admin site access — separate from Role.STAFF
     date_joined = models.DateTimeField(auto_now_add=True)
 
+    # Single-active-session enforcement — a client-generated id (persisted in
+    # the browser's localStorage) identifying the device currently signed in.
+    # Set on successful login, cleared on explicit logout; see LoginView and
+    # LogoutView. active_login_at lets a login from the SAME account recover
+    # automatically if it's older than the refresh token's lifetime, so a
+    # crashed browser / cleared storage can't lock the account out forever.
+    active_device_id = models.CharField(max_length=100, blank=True, default="")
+    active_login_at = models.DateTimeField(null=True, blank=True)
+
     objects = CustomUserManager()
 
     USERNAME_FIELD = "phone_number"
@@ -191,21 +206,6 @@ class Company(models.Model):
         APPROVED = "approved", "Approved"
         REJECTED = "rejected", "Rejected"
 
-    class CompanyType(models.TextChoices):
-        PRIVATE_LIMITED = "Private Limited", "Private Limited"
-        PUBLIC_LIMITED = "Public Limited", "Public Limited"
-        LLP = "LLP", "LLP"
-        PARTNERSHIP = "Partnership", "Partnership"
-        SOLE_PROPRIETORSHIP = "Sole Proprietorship", "Sole Proprietorship"
-        GOVERNMENT = "Government", "Government"
-        NON_PROFIT = "Non-Profit", "Non-Profit"
-
-    class AmcStatus(models.TextChoices):
-        ACTIVE = "Active", "Active"
-        INACTIVE = "Inactive", "Inactive"
-        EXPIRED = "Expired", "Expired"
-        NOT_APPLICABLE = "Not Applicable", "Not Applicable"
-
     draft_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
 
@@ -219,7 +219,8 @@ class Company(models.Model):
 
     company_name = models.CharField(max_length=200, blank=True)
     company_code = models.CharField(max_length=30, unique=True, null=True, blank=True)
-    company_type = models.CharField(max_length=30, choices=CompanyType.choices, blank=True)
+    # Options for this field come from DropdownOption (category="company_type"), admin-editable.
+    company_type = models.CharField(max_length=30, blank=True)
     gst_number = models.CharField(max_length=15, blank=True)
     pan_number = models.CharField(max_length=10, blank=True)
     website = models.URLField(blank=True)
@@ -241,7 +242,8 @@ class Company(models.Model):
     phone_number = models.CharField(max_length=10, blank=True)
     alternate_email = models.EmailField(blank=True)
 
-    amc_status = models.CharField(max_length=20, choices=AmcStatus.choices, blank=True)
+    # Options for this field come from DropdownOption (category="amc_status"), admin-editable.
+    amc_status = models.CharField(max_length=20, blank=True)
     amc_start_date = models.DateField(null=True, blank=True)
     amc_end_date = models.DateField(null=True, blank=True)
     preferred_channel = models.CharField(max_length=30, blank=True)
@@ -280,16 +282,12 @@ class Company(models.Model):
 
 
 class Product(models.Model):
-    class SupportType(models.TextChoices):
-        AMC = "AMC", "AMC"
-        NON_AMC = "NON-AMC", "NON-AMC"
-        SAS = "SAS", "SAS"
-
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="products")
     product_name = models.CharField(max_length=100)
     product_version = models.CharField(max_length=30, blank=True)
     activation_date = models.DateField(null=True, blank=True)
-    support_type = models.CharField(max_length=10, choices=SupportType.choices, default=SupportType.AMC)
+    # Options for this field come from DropdownOption (category="support_type"), admin-editable.
+    support_type = models.CharField(max_length=10, default="AMC")
     remarks = models.TextField(blank=True)
 
     class Meta:
@@ -345,3 +343,232 @@ class StaffProduct(models.Model):
 
     def __str__(self):
         return f"{self.staff} → {self.product_name} ({self.version or 'any version'})"
+
+
+class DropdownOption(models.Model):
+    """Admin-editable options for the onboarding form's simple metadata dropdowns
+    (Company Type, Industry Type, Annual Turnover, No. of Employees, AMC Status,
+    Preferred Support Channel/Time, Support Type) — add/remove entries here instead
+    of hardcoding them in the frontend."""
+
+    class Category(models.TextChoices):
+        COMPANY_TYPE = "company_type", "Company Type"
+        INDUSTRY_TYPE = "industry_type", "Industry Type"
+        TURNOVER_RANGE = "turnover_range", "Annual Turnover"
+        EMPLOYEE_RANGE = "employee_range", "No. of Employees"
+        AMC_STATUS = "amc_status", "AMC Status"
+        SUPPORT_CHANNEL = "support_channel", "Preferred Support Channel"
+        SUPPORT_TIME = "support_time", "Preferred Support Time"
+        SUPPORT_TYPE = "support_type", "Support Type"
+
+    category = models.CharField(max_length=30, choices=Category.choices)
+    value = models.CharField(max_length=100)
+    display_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "dropdown_options"
+        ordering = ["category", "display_order", "id"]
+        unique_together = [("category", "value")]
+        verbose_name = "Dropdown Option"
+        verbose_name_plural = "Dropdown Options"
+
+    def __str__(self):
+        return f"{self.get_category_display()}: {self.value}"
+
+
+class LoginActivity(models.Model):
+    """One row per login attempt (success or failure) — lets an admin see
+    who signed in, as what role, from which company (customers), and from
+    where/when, without digging through server logs."""
+
+    class Status(models.TextChoices):
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="login_activities",
+    )
+    # Snapshotted at login time so the log stays readable even if the
+    # account is later renamed, deactivated, or deleted.
+    full_name = models.CharField(max_length=150, blank=True)
+    phone_number = models.CharField(max_length=10, blank=True)
+    role = models.CharField(max_length=20, blank=True)
+    company_name = models.CharField(max_length=200, blank=True)
+
+    status = models.CharField(max_length=10, choices=Status.choices)
+    failure_reason = models.CharField(max_length=100, blank=True)
+
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    location = models.CharField(max_length=100, blank=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "login_activity"
+        ordering = ["-created_at"]
+        verbose_name = "Login Activity"
+        verbose_name_plural = "Login Activity"
+
+    def __str__(self):
+        who = self.full_name or self.phone_number or "Unknown"
+        return f"{who} - {self.get_status_display()} @ {self.created_at:%d %b %Y %H:%M}"
+
+
+class StaffActivityLog(models.Model):
+    """Append-only record of operations a staff member performs — ticket
+    status changes, transfers, escalations, and accept/decline of offers."""
+
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="activity_logs",
+    )
+    full_name = models.CharField(max_length=150, blank=True)
+    phone_number = models.CharField(max_length=10, blank=True)
+
+    action = models.CharField(max_length=50)
+    description = models.CharField(max_length=255)
+
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "staff_activity_log"
+        ordering = ["-created_at"]
+        verbose_name = "Staff Activity"
+        verbose_name_plural = "Staff Activity"
+
+    def __str__(self):
+        who = self.full_name or self.phone_number or "Unknown"
+        return f"{who} - {self.action} @ {self.created_at:%d %b %Y %H:%M}"
+
+
+class CompanyContactSettings(models.Model):
+    """Singleton — the contact footer shown at the bottom of the
+    registration-received and account-approved emails (logo, company name,
+    email, phone). Only one row is ever kept; see save()."""
+
+    company_name = models.CharField(max_length=150, blank=True)
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=30, blank=True)
+    logo = models.ImageField(
+        upload_to="company_contact/",
+        blank=True,
+        null=True,
+        help_text=(
+            "Shown at the bottom of the registration-received and account-approved "
+            "emails. Best results: a square PNG or JPG at least 200×200px with a "
+            "plain or transparent background. Anything larger is automatically "
+            "resized to fit, so there's no need to pre-crop it."
+        ),
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "company_contact_settings"
+        verbose_name = "Email Contact Details"
+        verbose_name_plural = "Email Contact Details"
+
+    def __str__(self):
+        return self.company_name or "Email contact details"
+
+    # Only one row is ever meaningful — every save collapses onto pk=1
+    # instead of letting the admin accidentally create a second row.
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        if self.logo:
+            self._resize_logo()
+        super().save(*args, **kwargs)
+
+    def _resize_logo(self):
+        """Downscales the uploaded logo to fit within a 200x200 box (upscaling
+        never happens) and normalizes it to PNG, so any photo an admin
+        uploads renders well in the email regardless of its original size."""
+        max_size = (200, 200)
+        try:
+            from PIL import Image
+            self.logo.seek(0)
+            image = Image.open(self.logo)
+            image = image.convert("RGBA") if image.mode not in ("RGB", "RGBA") else image
+            if image.width > max_size[0] or image.height > max_size[1]:
+                image.thumbnail(max_size, Image.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            buffer.seek(0)
+            new_name = os.path.splitext(os.path.basename(self.logo.name))[0] + ".png"
+            self.logo.save(new_name, ContentFile(buffer.read()), save=False)
+        except Exception:
+            # Worst case the original upload is kept as-is — never block saving.
+            logger.exception("Failed to resize company contact logo")
+
+
+class ReportPasswordSettings(models.Model):
+    """Singleton — the password required to edit the .xlsx ticket report
+    exported from All Tickets by staff/admin. Customers get a different,
+    per-customer default (last 4 digits of their own phone number) instead,
+    computed on the frontend — this table only governs staff/admin exports.
+    Only one row is ever kept; see save()."""
+
+    password = models.CharField(max_length=50, default="tixa@1234")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "report_password_settings"
+        verbose_name = "Report Password"
+        verbose_name_plural = "Report Password"
+
+    def __str__(self):
+        return "Report password"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Admin-grouping proxies — same tables as above, just filed under their own
+# "Activity Logs" / "Dropdown Options" / "Email Contact Details" sections in
+# the Django admin instead of "Authentication" (see activitylog/
+# dropdownoptions/emailcontact apps + admin.py).
+# ---------------------------------------------------------------------------
+
+class LoginActivityProxy(LoginActivity):
+    class Meta:
+        proxy = True
+        app_label = "activitylog"
+        verbose_name = "Login Activity"
+        verbose_name_plural = "Login Activity"
+
+
+class StaffActivityProxy(StaffActivityLog):
+    class Meta:
+        proxy = True
+        app_label = "activitylog"
+        verbose_name = "Staff Activity"
+        verbose_name_plural = "Staff Activity"
+
+
+class DropdownOptionProxy(DropdownOption):
+    class Meta:
+        proxy = True
+        app_label = "dropdownoptions"
+        verbose_name = "Dropdown Option"
+        verbose_name_plural = "Dropdown Options"
+
+
+class CompanyContactSettingsProxy(CompanyContactSettings):
+    class Meta:
+        proxy = True
+        app_label = "emailcontact"
+        verbose_name = "Email Contact Details"
+        verbose_name_plural = "Email Contact Details"
+
+
+class ReportPasswordSettingsProxy(ReportPasswordSettings):
+    class Meta:
+        proxy = True
+        app_label = "reportpassword"
+        verbose_name = "Report Password"
+        verbose_name_plural = "Report Password"

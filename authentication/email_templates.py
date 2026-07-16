@@ -22,6 +22,98 @@ def _logo_bytes():
         return f.read()
 
 
+_COMPANY_LOGO_CID = "company_contact_logo"
+
+
+def _get_company_contact():
+    """The admin-configured contact-footer settings, or None if nothing has
+    been filled in yet (Email Contact Details section in the Django admin)."""
+    from .models import CompanyContactSettings
+    try:
+        return CompanyContactSettings.objects.first()
+    except Exception:
+        return None
+
+
+def _company_contact_footer(contact):
+    """HTML block for the bottom of an email — logo, company name, email,
+    phone. Returns "" (renders nothing) if no contact details are configured
+    or none of the fields are filled in, so this is a no-op until an admin
+    sets it up."""
+    if not contact:
+        return ""
+
+    lines = []
+    if contact.company_name:
+        lines.append(
+            f'<div style="color:#1C1E22;font-size:13px;font-weight:700;'
+            f'font-family:\'Segoe UI\',Helvetica,Arial,sans-serif;">{contact.company_name}</div>'
+        )
+    contact_bits = [b for b in (contact.contact_email, contact.contact_phone) if b]
+    if contact_bits:
+        lines.append(
+            f'<div style="color:#6E6B62;font-size:12px;font-family:\'Segoe UI\',Helvetica,Arial,sans-serif;">'
+            f'{" &middot; ".join(contact_bits)}</div>'
+        )
+    if not lines:
+        return ""
+
+    logo_cell = ""
+    if contact.logo:
+        logo_cell = (
+            f'<td style="width:48px;padding-right:14px;" valign="middle">'
+            f'<img src="cid:{_COMPANY_LOGO_CID}" width="44" alt="{contact.company_name}" '
+            f'style="display:block;width:44px;height:auto;border-radius:8px;" /></td>'
+        )
+
+    return f"""
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:4px;border-top:1px solid #E5E2DA;">
+      <tr>
+        <td style="padding-top:18px;">
+          <div style="color:#A6A297;font-family:'Courier New',Courier,monospace;font-size:10px;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:10px;">
+            For further details, contact
+          </div>
+          <table role="presentation" cellpadding="0" cellspacing="0">
+            <tr>
+              {logo_cell}
+              <td valign="middle">{"".join(lines)}</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>"""
+
+
+def _company_contact_footer_text(contact):
+    """Plain-text mirror of _company_contact_footer, for the text/plain part."""
+    if not contact:
+        return ""
+    lines = [l for l in (contact.company_name,) if l]
+    bits = [b for b in (contact.contact_email, contact.contact_phone) if b]
+    if bits:
+        lines.append(" | ".join(bits))
+    if not lines:
+        return ""
+    return "\n\nFor further details, contact:\n" + "\n".join(lines)
+
+
+def company_contact_extra_images():
+    """[(bytes, cid, subtype)] for the admin-uploaded contact logo, or []
+    if none is configured — passed as extra_images to send_branded_email so
+    the cid:company_contact_logo reference in the footer HTML actually
+    resolves to an attached image."""
+    contact = _get_company_contact()
+    if not contact or not contact.logo:
+        return []
+    try:
+        contact.logo.open("rb")
+        data = contact.logo.read()
+        contact.logo.close()
+        return [(data, _COMPANY_LOGO_CID, "png")]
+    except Exception:
+        return []
+
+
 # Shared shell — header/footer used by every email type.
 def _wrap_email(eyebrow, title, body_html):
     return f"""<!DOCTYPE html>
@@ -147,9 +239,14 @@ def _footnote(text):
 # OTP emails — M-PIN change and M-PIN forgot flows.
 
 def build_otp_email_html(display_name, otp, title, intro_text):
-    body = _paragraph(f"Hi {display_name},<br><br>{intro_text}") + _otp_box(otp) + _footnote(
-        "This code expires in <strong>10 minutes</strong>. If you didn't request this, "
-        "you can safely ignore this email &mdash; your account is still secure."
+    body = (
+        _paragraph(f"Hi {display_name},<br><br>{intro_text}")
+        + _otp_box(otp)
+        + _footnote(
+            "This code expires in <strong>10 minutes</strong>. If you didn't request this, "
+            "you can safely ignore this email &mdash; your account is still secure."
+        )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("SECURITY &middot; VERIFICATION", title, body)
 
@@ -161,7 +258,8 @@ def build_otp_email_text(display_name, otp, title, intro_text):
         f"{intro_text}\n\n"
         f"Your OTP: {otp}\n\n"
         f"This code expires in 10 minutes. If you didn't request this, "
-        f"you can safely ignore this email — your account is still secure.\n\n"
+        f"you can safely ignore this email — your account is still secure."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -186,6 +284,7 @@ def build_ticket_raised_email_html(customer_name, ticket_id, subject, category, 
             "You can track this ticket's status any time from your TIXA dashboard. "
             "We'll email you again once it's resolved."
         )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("TICKET &middot; RECEIVED", "We've got your ticket", body)
 
@@ -204,7 +303,8 @@ def build_ticket_raised_email_text(customer_name, ticket_id, subject, category, 
         f"Product: {product or 'Not Applicable'}\n"
         f"{description_block}\n"
         f"You can track this ticket's status any time from your TIXA dashboard. "
-        f"We'll email you again once it's resolved.\n\n"
+        f"We'll email you again once it's resolved."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -218,9 +318,14 @@ def build_ticket_resolved_email_html(customer_name, ticket_id, subject, resolved
         ("Subject", subject),
         ("Resolved By", resolved_by_name or "TIXA Team"),
     ])
-    body = _paragraph(f"Hi {customer_name},<br><br>{intro}") + details + _footnote(
-        "If everything looks good, no action is needed. If the issue comes back or "
-        "this wasn't fully resolved, you can raise a new ticket"
+    body = (
+        _paragraph(f"Hi {customer_name},<br><br>{intro}")
+        + details
+        + _footnote(
+            "If everything looks good, no action is needed. If the issue comes back or "
+            "this wasn't fully resolved, you can raise a new ticket"
+        )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("TICKET &middot; RESOLVED", "Your ticket has been resolved", body)
 
@@ -234,7 +339,8 @@ def build_ticket_resolved_email_text(customer_name, ticket_id, subject, resolved
         f"Subject: {subject}\n"
         f"Resolved By: {resolved_by_name or 'TIXA Team'}\n\n"
         f"If everything looks good, no action is needed. If the issue comes back or "
-        f"this wasn't fully resolved, you can reopen the ticket from your dashboard.\n\n"
+        f"this wasn't fully resolved, you can reopen the ticket from your dashboard."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -248,9 +354,14 @@ def build_registration_received_email_html(contact_name, company_name, company_c
         ("Reference Code", company_code or "—"),
         ("Status", "Under Review"),
     ])
-    body = _paragraph(f"Hi {contact_name},<br><br>{intro}") + details + _footnote(
-        "You'll get another email as soon as an admin approves the account — after "
-        "that you can log in with the mobile number and password you just set."
+    body = (
+        _paragraph(f"Hi {contact_name},<br><br>{intro}")
+        + details
+        + _footnote(
+            "You'll get another email as soon as an admin approves the account — after "
+            "that you can log in with the mobile number and password you just set."
+        )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("REGISTRATION &middot; RECEIVED", "We've got your registration", body)
 
@@ -262,7 +373,8 @@ def build_registration_received_email_text(contact_name, company_name, company_c
         f"Thanks for registering {company_name} with TIXA. Your registration "
         f"(reference {company_code}) is now under review.\n\n"
         f"You'll get another email as soon as an admin approves the account — after "
-        f"that you can log in with the mobile number and password you just set.\n\n"
+        f"that you can log in with the mobile number and password you just set."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -276,9 +388,14 @@ def build_approval_email_html(contact_name, company_name, phone_number):
         ("Phone Number", phone_number),
         ("Password", "the one you set during registration"),
     ])
-    body = _paragraph(f"Hi {contact_name},<br><br>{intro}") + details + _footnote(
-        "Log in with the details above, and you'll be prompted to set an M-PIN on "
-        "your first login for faster sign-ins after that."
+    body = (
+        _paragraph(f"Hi {contact_name},<br><br>{intro}")
+        + details
+        + _footnote(
+            "Log in with the details above, and you'll be prompted to set an M-PIN on "
+            "your first login for faster sign-ins after that."
+        )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("ACCOUNT &middot; APPROVED", "Welcome to TIXA", body)
 
@@ -291,7 +408,8 @@ def build_approval_email_text(contact_name, company_name, phone_number):
         f"You can now log in with:\n"
         f"Phone number: {phone_number}\n"
         f"Password: the one you set during registration\n\n"
-        f"Please log in and set your M-PIN on first login.\n\n"
+        f"Please log in and set your M-PIN on first login."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -308,9 +426,14 @@ def build_rejection_email_html(contact_name, company_name, reason=""):
             label_color="#C4432E",
             border_color="rgba(196,67,46,0.2)",
         )
-    body = _paragraph(f"Hi {contact_name},<br><br>{intro}") + reason_block + _footnote(
-        "If you believe this is a mistake, please contact support and reference "
-        f"{company_name} in your message."
+    body = (
+        _paragraph(f"Hi {contact_name},<br><br>{intro}")
+        + reason_block
+        + _footnote(
+            "If you believe this is a mistake, please contact support and reference "
+            f"{company_name} in your message."
+        )
+        + _company_contact_footer(_get_company_contact())
     )
     return _wrap_email("REGISTRATION &middot; UPDATE", "Update on your registration", body)
 
@@ -322,7 +445,8 @@ def build_rejection_email_text(contact_name, company_name, reason=""):
         f"Hi {contact_name},\n\n"
         f"We're unable to approve the registration for {company_name} at this time."
         f"{reason_line}\n\n"
-        f"If you believe this is a mistake, please contact support.\n\n"
+        f"If you believe this is a mistake, please contact support."
+        f"{_company_contact_footer_text(_get_company_contact())}\n\n"
         f"— TIXA"
     )
 
@@ -331,10 +455,17 @@ class _RelatedEmail(EmailMultiAlternatives):
     """Django 6 dropped the old `mixed_subtype = 'related'` escape hatch, so
     there's no supported way to get an inline CID image via `.attach()`
     anymore. Instead, this overrides `.message()` — called both directly and
-    internally by `.send()` — to graft the logo onto the html alternative
+    internally by `.send()` — to graft the logo(s) onto the html alternative
     part specifically (not the top-level message), producing the standard
-    multipart/alternative[text, multipart/related[html, image]] structure
-    mail clients expect for "html body with one inline image"."""
+    multipart/alternative[text, multipart/related[html, image...]] structure
+    mail clients expect for "html body with inline images"."""
+
+    def __init__(self, *args, extra_images=None, **kwargs):
+        # extra_images: [(bytes, cid, subtype), ...] — additional inline
+        # images beyond the always-present TIXA logo (e.g. the admin-
+        # configured company contact logo).
+        self._extra_images = extra_images or []
+        super().__init__(*args, **kwargs)
 
     def message(self, *args, **kwargs):
         # The SMTP backend calls this as message(policy=email.policy.SMTP) —
@@ -342,17 +473,20 @@ class _RelatedEmail(EmailMultiAlternatives):
         msg = super().message(*args, **kwargs)
         html_part = msg.get_payload()[1]
         html_part.add_related(_logo_bytes(), "image", "png", cid=f"<{_LOGO_CID}>")
+        for data, cid, subtype in self._extra_images:
+            html_part.add_related(data, "image", subtype, cid=f"<{cid}>")
         return msg
 
 
 # Shared sender used by every branded email above.
 
-def send_branded_email(to_email, subject, text_body, html_body):
+def send_branded_email(to_email, subject, text_body, html_body, extra_images=None):
     email = _RelatedEmail(
         subject=subject,
         body=text_body,
         from_email=settings.DEFAULT_FROM_EMAIL,
         to=[to_email],
+        extra_images=extra_images,
     )
     email.attach_alternative(html_body, "text/html")
     email.send(fail_silently=False)

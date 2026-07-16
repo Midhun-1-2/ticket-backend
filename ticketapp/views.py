@@ -9,11 +9,13 @@ from rest_framework.views import APIView
 
 from authentication.models import Product, StaffAssignment, StaffProduct
 from authentication.permissions import IsAdmin, IsAdminOrStaff
+from authentication.utils import log_staff_activity
 from authentication.email_templates import (
     build_ticket_raised_email_html,
     build_ticket_raised_email_text,
     build_ticket_resolved_email_html,
     build_ticket_resolved_email_text,
+    company_contact_extra_images,
     send_branded_email,
 )
 
@@ -60,7 +62,10 @@ def send_ticket_raised_email(ticket):
             ticket.id, ticket.subject, ticket.category.name, ticket.priority,
             ticket.product, ticket.description,
         )
-        send_branded_email(customer.email, "We've got your ticket", text_body, html_body)
+        send_branded_email(
+            customer.email, "We've got your ticket", text_body, html_body,
+            extra_images=company_contact_extra_images(),
+        )
     except Exception:
         # Ticket creation must succeed even if the mail server is down.
         pass
@@ -81,7 +86,10 @@ def send_ticket_resolved_email(ticket, resolved_by):
             customer.full_name or customer.phone_number,
             ticket.id, ticket.subject, resolved_by_name,
         )
-        send_branded_email(customer.email, "Your ticket has been resolved", text_body, html_body)
+        send_branded_email(
+            customer.email, "Your ticket has been resolved", text_body, html_body,
+            extra_images=company_contact_extra_images(),
+        )
     except Exception:
         pass
 
@@ -129,20 +137,36 @@ def get_eligible_staff_ids(ticket):
     if not company:
         return set()
 
-    company_staff_ids = set(
-        StaffAssignment.objects.filter(company=company, is_current=True, staff__is_active=True)
-        .filter(Q(product_name='') | Q(product_name=ticket.product))
-        .values_list('staff_id', flat=True)
+    assignments = StaffAssignment.objects.filter(
+        company=company, is_current=True, staff__is_active=True
+    ).filter(Q(product_name='') | Q(product_name=ticket.product))
+
+    # Staff explicitly assigned to THIS product for THIS company (whether from
+    # onboarding's per-product step or auto-linked when the product was added
+    # later) are always eligible — that assignment is already precise to this
+    # company + product, so it's never narrowed further by the global
+    # StaffProduct table (which only reflects OTHER companies'/contexts'
+    # configuration and was wrongly excluding correctly-assigned staff here).
+    explicit_staff_ids = set(
+        assignments.filter(product_name=ticket.product).values_list('staff_id', flat=True)
     )
 
-    # Narrow to staff configured (via Product Master) to handle this specific product.
-    product_staff_ids = set(
-        StaffProduct.objects.filter(product_name=ticket.product, staff__is_active=True)
-        .values_list('staff_id', flat=True)
+    # Staff assigned as this company's primary/blanket contact (product_name='')
+    # are eligible only if also configured (via Product Master) to handle this
+    # specific product — keeps a "handles everything" assignment from routing
+    # tickets for products they don't actually support. Unchanged from before.
+    blanket_staff_ids = set(
+        assignments.filter(product_name='').values_list('staff_id', flat=True)
     )
-    if product_staff_ids:
-        return company_staff_ids & product_staff_ids
-    return company_staff_ids
+    if blanket_staff_ids:
+        product_staff_ids = set(
+            StaffProduct.objects.filter(product_name=ticket.product, staff__is_active=True)
+            .values_list('staff_id', flat=True)
+        )
+        if product_staff_ids:
+            blanket_staff_ids &= product_staff_ids
+
+    return explicit_staff_ids | blanket_staff_ids
 
 
 def offer_ticket_to_eligible_staff(ticket):
@@ -357,6 +381,10 @@ class TicketStatusUpdateView(APIView):
             ticket=ticket, from_status=previous_status, to_status=new_status,
             remark=remark, changed_by=request.user,
         )
+        log_staff_activity(
+            request, 'status_change',
+            f"Changed ticket #{str(ticket.id)[:8]} status from {previous_status} to {new_status}",
+        )
 
         # Only fire on the transition INTO Resolved.
         if ticket.status == 'Resolved' and previous_status != 'Resolved':
@@ -366,11 +394,13 @@ class TicketStatusUpdateView(APIView):
 
 
 class TransferTicketView(APIView):
-    """Hands a ticket to another staff member immediately and completely —
-    same immediate-handoff pattern as EscalateTicketView, no accept/decline
-    step. The incoming staff's TicketAssignment row is created 'accepted'
-    outright and ticket.assigned_staff flips to them in the same request,
-    so the ticket is never left dangling unassigned waiting on a response."""
+    """Hands a ticket to another staff member as a pending offer — same
+    accept/decline step as a fresh ticket offer (offer_ticket_to_eligible_staff),
+    just targeted at the one chosen staff member instead of broadcast to
+    everyone eligible. The ticket sits unassigned until they accept it from
+    Ticket Assignment, matching the release_staff_tickets pattern used on
+    deactivation. Escalation to admin (EscalateTicketView) is unrelated and
+    unchanged — it stays an immediate handoff."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
@@ -402,11 +432,11 @@ class TransferTicketView(APIView):
 
             incoming, created = TicketAssignment.objects.get_or_create(
                 ticket=ticket, staff=new_staff,
-                defaults={'status': 'accepted', 'responded_at': timezone.now()},
+                defaults={'status': 'pending'},
             )
             if not created:
-                incoming.status = 'accepted'
-                incoming.responded_at = timezone.now()
+                incoming.status = 'pending'
+                incoming.responded_at = None
                 incoming.transferred_to = None
                 incoming.save(update_fields=['status', 'responded_at', 'transferred_to'])
 
@@ -414,11 +444,15 @@ class TransferTicketView(APIView):
             log_assignment_event(ticket, 'transferred', staff=outgoing_staff, to_staff=new_staff)
 
             # escalated/escalated_at/escalation_note are kept as permanent history, not cleared.
-            ticket.assigned_staff = new_staff
-            if ticket.status == 'Open':
-                ticket.status = 'In Progress'
-            ticket.save(update_fields=['assigned_staff', 'status', 'updated_at'])
+            # Unassigned until the new staff member accepts — AcceptTicketAssignmentView
+            # bumps Open -> In Progress itself, same as a fresh offer.
+            ticket.assigned_staff = None
+            ticket.save(update_fields=['assigned_staff', 'updated_at'])
 
+        log_staff_activity(
+            request, 'transfer',
+            f"Transferred ticket #{str(ticket.id)[:8]} to {new_staff.full_name or new_staff.phone_number}",
+        )
         return Response(TicketSerializer(ticket).data)
 
 
@@ -474,6 +508,7 @@ class EscalateTicketView(APIView):
                 'status', 'updated_at',
             ])
 
+        log_staff_activity(request, 'escalate', f"Escalated ticket #{str(ticket.id)[:8]} to admin")
         return Response(TicketSerializer(ticket).data)
 
 
@@ -579,6 +614,7 @@ class AcceptTicketAssignmentView(APIView):
             for other in other_pending:
                 log_assignment_event(ticket, 'unavailable', staff=other.staff)
 
+        log_staff_activity(request, 'accept_ticket', f"Accepted ticket #{str(ticket.id)[:8]}")
         return Response(TicketAssignmentSerializer(assignment).data)
 
 
@@ -598,6 +634,7 @@ class DeclineTicketAssignmentView(APIView):
         assignment.responded_at = timezone.now()
         assignment.save(update_fields=['status', 'responded_at'])
         log_assignment_event(assignment.ticket, 'declined', staff=assignment.staff)
+        log_staff_activity(request, 'decline_ticket', f"Declined ticket #{str(assignment.ticket_id)[:8]}")
         return Response(TicketAssignmentSerializer(assignment).data)
 
 

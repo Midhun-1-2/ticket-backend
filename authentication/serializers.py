@@ -30,6 +30,9 @@ class LoginInputSerializer(serializers.Serializer):
     phone_number = serializers.CharField(max_length=10, min_length=10)
     password = serializers.CharField(required=False, allow_blank=True)
     mpin = serializers.CharField(required=False, allow_blank=True)
+    # Client-generated id identifying this browser/device — used to allow the
+    # SAME device to re-login freely while blocking a second, different device.
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
 
     def validate(self, attrs):
         if not attrs.get("password") and not attrs.get("mpin"):
@@ -131,7 +134,7 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
     # blank means blank: OnboardingSubmitView stores None rather than
     # generating one.
     company_code = serializers.CharField(max_length=30, required=False, allow_blank=True)
-    company_type = serializers.ChoiceField(choices=Company.CompanyType.choices)
+    company_type = serializers.CharField(max_length=30)
     address_line1 = serializers.CharField(max_length=255)
     city = serializers.CharField(max_length=100)
     state = serializers.CharField(max_length=100)
@@ -140,7 +143,7 @@ class CompanySubmitSerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(max_length=150)
     email = serializers.EmailField()
     mobile_number = serializers.CharField(max_length=10, min_length=10)
-    amc_status = serializers.ChoiceField(choices=Company.AmcStatus.choices)
+    amc_status = serializers.CharField(max_length=20)
     products_in_use = serializers.ListField(child=serializers.CharField(), min_length=1)
 
     # Not model fields — used only to create the CustomUser account, then discarded.

@@ -70,6 +70,7 @@ class TicketSerializer(serializers.ModelSerializer):
     assigned_staff = RaisedBySerializer(read_only=True)
     # Latest status-change remark, visible to everyone (distinct from the admin-only full history).
     current_remark = serializers.SerializerMethodField()
+    company_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Ticket
@@ -77,17 +78,21 @@ class TicketSerializer(serializers.ModelSerializer):
             'id', 'subject', 'category', 'priority', 'description', 'product',
             'status', 'raised_by', 'assigned_staff', 'attachments',
             'escalated', 'escalated_at', 'escalation_note', 'closed_at',
-            'current_remark', 'created_at', 'updated_at',
+            'current_remark', 'company_name', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'status', 'raised_by', 'assigned_staff',
             'escalated', 'escalated_at', 'escalation_note', 'closed_at',
-            'current_remark', 'created_at', 'updated_at',
+            'current_remark', 'company_name', 'created_at', 'updated_at',
         ]
 
     def get_current_remark(self, obj):
         latest = obj.status_history.first()  # ordering = ['-created_at']
         return latest.remark if latest else ''
+
+    def get_company_name(self, obj):
+        company = getattr(getattr(obj.raised_by, 'company', None), 'company_name', None)
+        return company or ''
 
     def validate_subject(self, value):
         value = value.strip()

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Q
@@ -10,9 +11,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 import random
 from datetime import timedelta
-from .models import Company, EmailOTP, Mpin, Product, StaffAssignment, StaffProduct, StaffRole, StaffDepartment
+from .models import Company, DropdownOption, EmailOTP, Mpin, Product, ReportPasswordSettings, StaffAssignment, StaffProduct, StaffRole, StaffDepartment
 from .permissions import IsAdminOrStaff
-from .email_templates import build_otp_email_html, build_otp_email_text, send_branded_email
+from .email_templates import (
+    build_otp_email_html, build_otp_email_text, company_contact_extra_images, send_branded_email,
+)
 from .serializers import (
     CompanyDetailSerializer,
     CompanyDraftSerializer,
@@ -47,6 +50,8 @@ from .utils import (
     send_approval_email,
     send_registration_received_email,
     send_rejection_email,
+    record_login_activity,
+    get_client_ip,
 )
 from ticketapp.models import ProductMaster, Ticket
 from ticketapp.views import release_staff_tickets, restore_staff_eligibility
@@ -56,6 +61,10 @@ User = get_user_model()
 
 def issue_tokens(user):
     refresh = RefreshToken.for_user(user)
+    # Stamped onto both tokens (access inherits it from the refresh token)
+    # so DeviceCheckedJWTAuthentication can tell a superseded session's
+    # still-unexpired token apart from the current one — see jwt_auth.py.
+    refresh["device_id"] = user.active_device_id or ""
     return {
         "access": str(refresh.access_token),
         "refresh": str(refresh),
@@ -69,7 +78,7 @@ def send_otp_email(user, otp, title, intro_text):
     """Sends a branded HTML OTP email with a plain-text fallback."""
     text_body = build_otp_email_text(user.full_name or user.phone_number, otp, title, intro_text)
     html_body = build_otp_email_html(user.full_name or user.phone_number, otp, title, intro_text)
-    send_branded_email(user.email, title, text_body, html_body)
+    send_branded_email(user.email, title, text_body, html_body, extra_images=company_contact_extra_images())
 
 
 def inactive_account_response(user):
@@ -98,30 +107,124 @@ class LoginView(APIView):
 
         user = User.objects.filter(phone_number=phone_number).first()
         if not user:
+            record_login_activity(
+                request, phone_number=phone_number, status="failed",
+                failure_reason="No account with this phone number",
+            )
             return Response({"detail": "Incorrect phone number or credentials."}, status=400)
 
         if mpin:
             if not hasattr(user, "mpin"):
+                record_login_activity(
+                    request, user=user, status="failed", failure_reason="M-PIN not set",
+                )
                 return Response(
                     {"detail": "M-PIN not set for this account. Please log in with your password."},
                     status=400,
                 )
             if not user.mpin.check_mpin(mpin):
+                record_login_activity(
+                    request, user=user, status="failed", failure_reason="Incorrect M-PIN",
+                )
                 return Response({"detail": "Incorrect phone number or M-PIN."}, status=400)
         else:
             if not user.check_password(password):
+                record_login_activity(
+                    request, user=user, status="failed", failure_reason="Incorrect password",
+                )
                 return Response({"detail": "Incorrect phone number or password."}, status=400)
 
         if not user.is_active:
+            record_login_activity(
+                request, user=user, status="failed", failure_reason="Account deactivated or rejected",
+            )
             return inactive_account_response(user)
 
         if not user.is_approved:
+            record_login_activity(
+                request, user=user, status="failed", failure_reason="Pending admin approval",
+            )
             return Response({"detail": "pending_approval"}, status=403)
 
         if not hasattr(user, "mpin"):
             return Response({"mpin_required": True})
 
+        # Single-active-session enforcement — block a second device until the
+        # first one explicitly logs out. The SAME device (matching device_id)
+        # is always allowed back in; a stale session past the refresh token's
+        # lifetime is treated as dead even if logout was never called (e.g.
+        # a crashed browser), so the account can't be locked out forever.
+        device_id = (data.get("device_id") or "").strip()
+        if user.active_device_id and user.active_device_id != device_id:
+            refresh_lifetime = settings.SIMPLE_JWT.get("REFRESH_TOKEN_LIFETIME", timedelta(days=7))
+            session_expired = (
+                not user.active_login_at
+                or timezone.now() - user.active_login_at > refresh_lifetime
+            )
+            if not session_expired:
+                record_login_activity(
+                    request, user=user, status="failed",
+                    failure_reason="Already logged in on another device",
+                )
+                return Response(
+                    {"detail": "already_logged_in",
+                     "message": "This account is already signed in on another device. Please log out there first."},
+                    status=409,
+                )
+
+        user.active_device_id = device_id
+        user.active_login_at = timezone.now()
+        user.save(update_fields=["active_device_id", "active_login_at"])
+
+        record_login_activity(request, user=user, status="success")
         return Response(issue_tokens(user))
+
+
+class SessionCheckView(APIView):
+    """GET — a trivial authenticated ping. On its own it does nothing; the
+    point is that DeviceCheckedJWTAuthentication runs first and 401s a
+    superseded token. Polled periodically from MainLayout (App.jsx) so an
+    idle tab that isn't otherwise making API calls still discovers within
+    a few seconds that 'logout from all devices' (or a newer login
+    elsewhere) ended its session, instead of only finding out the next
+    time it happens to hit a real endpoint."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"ok": True})
+
+
+class ForceLogoutView(APIView):
+    """Public — lets someone blocked by the single-active-session gate (they
+    got 'already_logged_in' on the login screen) clear that stale session
+    without needing physical access to the other device. Re-proves account
+    ownership with the same password/M-PIN check LoginView uses, then clears
+    active_device_id/active_login_at. Does not issue tokens — the user still
+    logs in normally afterward."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = LoginInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        user = User.objects.filter(phone_number=data["phone_number"]).first()
+        if not user:
+            return Response({"detail": "Incorrect phone number or credentials."}, status=400)
+
+        mpin = data.get("mpin")
+        if mpin:
+            if not hasattr(user, "mpin") or not user.mpin.check_mpin(mpin):
+                return Response({"detail": "Incorrect phone number or M-PIN."}, status=400)
+        else:
+            if not user.check_password(data.get("password")):
+                return Response({"detail": "Incorrect phone number or password."}, status=400)
+
+        user.active_device_id = ""
+        user.active_login_at = None
+        user.save(update_fields=["active_device_id", "active_login_at"])
+
+        return Response({"success": True})
 
 
 class CreateMpinView(APIView):
@@ -158,6 +261,27 @@ class DetectRoleView(APIView):
         serializer.is_valid(raise_exception=True)
         return Response(serializer.to_role_response())
 
+class MyIpView(APIView):
+    """Public — returns the caller's IP address, shown on the login screen."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"ip": get_client_ip(request)})
+
+
+class ReportPasswordView(APIView):
+    """Staff/admin only — the password they need to unlock editing of a
+    ticket report .xlsx exported from All Tickets. Customers aren't allowed
+    here; their export uses their own phone number's last 4 digits instead,
+    computed client-side (see AllTickets.jsx)."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        row = ReportPasswordSettings.objects.first()
+        password = row.password if row else ReportPasswordSettings._meta.get_field("password").default
+        return Response({"password": password})
+
+
 class CheckMobileAvailabilityView(APIView):
     """Public pre-check for whether a mobile number is already registered."""
     permission_classes = [AllowAny]
@@ -166,6 +290,20 @@ class CheckMobileAvailabilityView(APIView):
         mobile_number = (request.query_params.get("mobile_number") or "").strip()
         exists = bool(mobile_number) and User.objects.filter(phone_number=mobile_number).exists()
         return Response({"exists": exists})
+
+
+class DropdownOptionListView(APIView):
+    """Public, unauthenticated, read-only lookup for the onboarding form's
+    admin-editable dropdowns (see DropdownOption in models.py). Returns
+    { category: [value, value, ...], ... }, active options only, in
+    display_order — add/remove options from the Django admin, not here."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        grouped = {}
+        for opt in DropdownOption.objects.filter(is_active=True):
+            grouped.setdefault(opt.category, []).append(opt.value)
+        return Response(grouped)
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +943,12 @@ class LogoutView(APIView):
             token.blacklist()
         except TokenError:
             return Response({"detail": "Invalid or already-expired token."}, status=400)
+
+        # Frees up the single-active-session slot so this account can log in
+        # on another device again.
+        request.user.active_device_id = ""
+        request.user.active_login_at = None
+        request.user.save(update_fields=["active_device_id", "active_login_at"])
 
         return Response({"detail": "Logged out successfully."})
     

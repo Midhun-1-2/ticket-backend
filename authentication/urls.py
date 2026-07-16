@@ -7,12 +7,17 @@ urlpatterns = [
     path("login/", views.LoginView.as_view(), name="login"),
     path("login/refresh/", TokenRefreshView.as_view(), name="login-refresh"),
     path("detect-role/", views.DetectRoleView.as_view(), name="detect-role"),
+    path("my-ip/", views.MyIpView.as_view(), name="my-ip"),
+    path("report-password/", views.ReportPasswordView.as_view(), name="report-password"),
+    path("force-logout/", views.ForceLogoutView.as_view(), name="force-logout"),
+    path("session-check/", views.SessionCheckView.as_view(), name="session-check"),
     path("mpin/create/", views.CreateMpinView.as_view(), name="mpin-create"),
     path('logout/', views.LogoutView.as_view(), name='logout'),
 
     # Onboarding — public
     path("onboarding/draft/", views.OnboardingDraftView.as_view(), name="onboarding-draft"),
     path("onboarding/submit/", views.OnboardingSubmitView.as_view(), name="onboarding-submit"),
+    path("dropdown-options/", views.DropdownOptionListView.as_view(), name="dropdown-options"),
 
     # Onboarding — admin/staff review
     path("onboarding/pending/", views.PendingCompanyListView.as_view(), name="onboarding-pending"),

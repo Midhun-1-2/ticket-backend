@@ -44,6 +44,10 @@ INSTALLED_APPS = [
     'corsheaders',
     'authentication',
     'ticketapp',
+    'activitylog',
+    'dropdownoptions',
+    'emailcontact',
+    'reportpassword',
     'rest_framework_simplejwt.token_blacklist',
 ]
 
@@ -106,7 +110,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'authentication.jwt_auth.DeviceCheckedJWTAuthentication',
     ),
 }
 
